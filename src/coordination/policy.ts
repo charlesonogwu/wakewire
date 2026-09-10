@@ -61,7 +61,8 @@ function parseEnvelope(body: string, marker: string, keys: readonly string[]) {
  * logical agents, so a shared account can cast both votes. Use separate IDs for
  * independently authenticated reviewers.
  * Labels: agent:AGENT, review:AGENT, changes-requested:AGENT, approved:AGENT,
- * blocked:coordination and the configured waiting label. Other labels are inert.
+ * blocked:coordination and the configured waiting label. Legacy owner: labels
+ * are rejected to prevent contradictory ownership; other labels are inert.
  */
 export function evaluateCoordination(
   snapshot: CoordinationSnapshot,
@@ -115,6 +116,7 @@ export function evaluateCoordination(
   const known = new Set([...ownerLabels, ...approvalLabels, ...workflows]);
   const labels = snapshot.labels;
   if (
+    labels.some((label) => label.startsWith("owner:")) ||
     labels.some(
       (label) =>
         /^(agent|review|changes-requested|approved|blocked|waiting):/.test(label) &&

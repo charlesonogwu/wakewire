@@ -43,6 +43,29 @@ function vote(
 }
 const approvals = () => [vote("codex"), vote("hermes")];
 describe("pure dual-review policy", () => {
+  it("accepts agent:hermes ownership with both current approvals", () => {
+    expect(
+      evaluateCoordination(
+        snapshot({
+          body: "<!-- agent-handoff:v1\norigin: hermes\nowner: hermes\nreviewer: codex\nimpacts: website\n-->",
+          labels: ["agent:hermes", "impact:website"],
+          comments: approvals(),
+        }),
+        config,
+      ).action,
+    ).toBe("ready");
+  });
+  it("blocks conflicting agent and legacy owner labels despite both approvals", () => {
+    expect(
+      evaluateCoordination(
+        snapshot({
+          labels: ["agent:codex", "owner:hermes"],
+          comments: approvals(),
+        }),
+        config,
+      ).action,
+    ).toBe("blocked");
+  });
   it.each([
     { labels: ["agent:hermes", "impact:website"], action: "wait" },
     { labels: ["agent:hermes", "impact:website", "review:codex"], action: "review" },
