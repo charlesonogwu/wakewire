@@ -228,7 +228,7 @@ export class DeliveryQueue {
   }
 
   private async deliver(route: Route, delivery: Delivery, prompt: string) {
-    const opts = { sandbox: route.sandbox, deliveryId: delivery.id };
+    const opts = { sandbox: route.sandbox, deliveryId: delivery.id, event: delivery.event };
     if (route.target.type === "thread") {
       return this.adapter.deliverToThread(route.target.threadId, prompt, opts);
     }

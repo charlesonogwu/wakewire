@@ -28,6 +28,27 @@ export function trimGithubEvent(args: {
   if (eventName === "issues") {
     return trimIssue({ repo, kind, action, deliveryId, occurredAt, payload });
   }
+  if (eventName === "check_run" && action === "completed") {
+    const check = isRecord(payload.check_run) ? payload.check_run : {};
+    const prs = Array.isArray(check.pull_requests) ? check.pull_requests : [];
+    // CI completion can make a previously quiet review ready. Never infer an
+    // association from a SHA or choose arbitrarily among multiple PRs.
+    const number = prs.length === 1 && isRecord(prs[0]) ? prNumber(prs[0].number) : null;
+    return {
+      source: "github",
+      kind,
+      deliveryId,
+      occurredAt,
+      summary: `${kind} event on ${repo}`,
+      payload: {
+        repo,
+        action,
+        senderId: isRecord(payload.sender) ? githubId(payload.sender.id) : null,
+        number,
+        isPullRequest: number !== null,
+      },
+    };
+  }
   if (
     eventName === "issue_comment" ||
     eventName === "pull_request_review_comment" ||
@@ -138,8 +159,7 @@ function trimPullRequest(args: {
 }): WakeEvent {
   const { repo, kind, action, deliveryId, occurredAt, payload } = args;
   const pr = isRecord(payload.pull_request) ? payload.pull_request : {};
-  const number =
-    typeof payload.number === "number" ? payload.number : (pr.number as number | undefined);
+  const number = prNumber(payload.number ?? pr.number);
   const title = typeof pr.title === "string" ? truncate(pr.title, 200) : "";
   const author = isRecord(pr.user) && typeof pr.user.login === "string" ? pr.user.login : "unknown";
   const url = typeof pr.html_url === "string" ? pr.html_url : "";
@@ -155,6 +175,8 @@ function trimPullRequest(args: {
       repo,
       ...(action ? { action } : {}),
       number: number ?? null,
+      senderId: isRecord(payload.sender) ? githubId(payload.sender.id) : null,
+      isPullRequest: true,
       title,
       author,
       url,
@@ -210,6 +232,10 @@ function githubId(value: unknown): string | null {
   if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return String(value);
   if (typeof value === "string" && /^[1-9]\d*$/.test(value)) return value;
   return null;
+}
+
+function prNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

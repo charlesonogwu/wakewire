@@ -1,6 +1,9 @@
+import type { WakeEvent } from "../core/event.js";
 import type { SandboxPolicy } from "../core/route.js";
 
 export interface DeliveryOptions {
+  /** Original persisted event, required by fresh-snapshot coordination gates. */
+  event?: WakeEvent | undefined;
   /** Durable queue identity, required by owner-routed Desktop delivery. */
   deliveryId?: string | undefined;
   sandbox: SandboxPolicy;

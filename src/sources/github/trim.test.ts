@@ -81,6 +81,97 @@ describe("trimGithubEvent — push", () => {
 });
 
 describe("trimGithubEvent — pull_request / issues / fallback", () => {
+  it("preserves sender ID and PR identity on label events", () => {
+    const result = trimGithubEvent({
+      eventName: "pull_request",
+      deliveryId: "label",
+      payload: {
+        action: "labeled",
+        number: 7,
+        repository: { full_name: "example/project" },
+        sender: { id: 202 },
+        pull_request: { number: 7 },
+      },
+    });
+    expect(result?.payload).toMatchObject({ number: 7, senderId: "202", isPullRequest: true });
+  });
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "7"])(
+    "does not expose invalid PR number %s",
+    (number) => {
+      const result = trimGithubEvent({
+        eventName: "pull_request",
+        deliveryId: "bad",
+        payload: {
+          number,
+          repository: { full_name: "example/project" },
+          pull_request: {},
+        },
+      });
+      expect(result?.payload.number).toBeNull();
+    },
+  );
+  it("uses exactly one associated PR for check_run.completed", () => {
+    const result = trimGithubEvent({
+      eventName: "check_run",
+      deliveryId: "ci",
+      payload: {
+        action: "completed",
+        repository: { full_name: "example/project" },
+        sender: { id: 303 },
+        check_run: {
+          head_sha: "a".repeat(40),
+          conclusion: "success",
+          pull_requests: [{ number: 7 }],
+        },
+      },
+    });
+    expect(result?.kind).toBe("check_run.completed");
+    expect(result?.payload).toEqual({
+      repo: "example/project",
+      action: "completed",
+      senderId: "303",
+      number: 7,
+      isPullRequest: true,
+    });
+  });
+  it.each(
+    [
+      undefined,
+      [],
+      [{ number: 7 }, { number: 8 }],
+      [{ number: 7 }, { number: 7 }],
+      [{ number: 0 }],
+      [{ number: "7" }],
+      [{ number: 1.2 }],
+      [{ number: Number.MAX_SAFE_INTEGER + 1 }],
+    ].map((pull_requests) => ({ pull_requests })),
+  )("does not guess missing, ambiguous, or invalid check associations %j", ({ pull_requests }) => {
+    const result = trimGithubEvent({
+      eventName: "check_run",
+      deliveryId: "ci",
+      payload: {
+        action: "completed",
+        number: 99,
+        repository: { full_name: "example/project" },
+        check_run: { pull_requests },
+      },
+    });
+    expect(result?.payload.number).toBeNull();
+    expect(result?.payload.isPullRequest).toBe(false);
+  });
+  it("does not infer a PR number from a status event", () => {
+    const result = trimGithubEvent({
+      eventName: "status",
+      deliveryId: "status",
+      payload: {
+        number: 7,
+        repository: { full_name: "example/project" },
+        state: "success",
+        sha: "a".repeat(40),
+      },
+    });
+    expect(result?.payload).toEqual({ repo: "example/project" });
+  });
   it("trims pull_request events with the action in the kind", () => {
     const event = trimGithubEvent({
       eventName: "pull_request",

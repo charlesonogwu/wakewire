@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { z } from "zod";
 import type { DaemonConfig } from "../config.js";
+import { CoordinationAdapter, CoordinationConfigSchema } from "../coordination/adapter.js";
+import { GithubSnapshotClient } from "../coordination/github.js";
 import type { Logger } from "../logging.js";
 import { CodexAppServerAdapter } from "./codex-app-server.js";
 import { CodexDesktopAdapter } from "./codex-desktop.js";
@@ -23,10 +25,18 @@ export function createAdapter(config: DaemonConfig, logger: Logger): AgentAdapte
           serverPath: z.string().min(1),
           serverSha256: z.string().regex(/^[a-f0-9]{64}$/),
           pipePath: z.string().min(1),
+          coordination: CoordinationConfigSchema.optional(),
         })
         .strict()
         .parse(JSON.parse(readFileSync(file, "utf8")));
-      return new CodexDesktopAdapter(registration, new DesktopMcpClient(registration));
+      const desktop = new CodexDesktopAdapter(registration, new DesktopMcpClient(registration));
+      return registration.coordination
+        ? new CoordinationAdapter(
+            registration.coordination,
+            new GithubSnapshotClient(registration.coordination.expectedRepository),
+            desktop,
+          )
+        : desktop;
     }
     case "codex-app-server":
       return new CodexAppServerAdapter(logger, {
