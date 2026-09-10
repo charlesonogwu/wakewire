@@ -14,7 +14,7 @@ import { CodexDesktopAdapter, type DesktopToolClient } from "../sinks/codex-desk
 import { createAdapter } from "../sinks/factory.js";
 import type { DeliveryOptions } from "../sinks/types.js";
 import { trimGithubEvent } from "../sources/github/trim.js";
-import { CoordinationAdapter } from "./adapter.js";
+import { CoordinationAdapter, CoordinationConfigSchema } from "./adapter.js";
 import { GithubSnapshotClient } from "./github.js";
 import type { Agent, CoordinationConfig } from "./policy.js";
 
@@ -62,7 +62,7 @@ const opts = (id = "webhook-one"): DeliveryOptions => ({
   deliveryId: id,
   event: event(id),
 });
-function fixture() {
+function fixture(coordination: CoordinationConfig = config) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "wakewire-coordination-"));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
   const desktopConfig = {
@@ -73,6 +73,7 @@ function fixture() {
   };
   const state = {
     head: sha,
+    branch: "hermes/example",
     body: "<!-- agent-handoff:v1\norigin: codex\nowner: codex\nreviewer: hermes\nimpacts: website\n-->",
     labels: ["agent:codex", "waiting:charles"],
     comments: [vote("codex"), vote("hermes")],
@@ -125,7 +126,7 @@ function fixture() {
         state: state.status,
         body: state.body,
         labels: state.labels.map((name) => ({ name })),
-        head: { sha: state.head, repo: { full_name: "example/project" } },
+        head: { sha: state.head, ref: state.branch, repo: { full_name: "example/project" } },
         base: { repo: { full_name: "example/project" } },
       };
     if (
@@ -153,8 +154,8 @@ function fixture() {
   const snapshots = new GithubSnapshotClient(config.expectedRepository, transport);
   const make = () => {
     const inner = new CodexDesktopAdapter(desktopConfig, client);
-    const adapter = new CoordinationAdapter(config, snapshots, inner);
-    cleanup.push(() => adapter.close());
+    cleanup.push(() => inner.close());
+    const adapter = new CoordinationAdapter(coordination, snapshots, inner);
     return adapter;
   };
   return {
@@ -585,6 +586,201 @@ function statusQueue(f: ReturnType<typeof fixture>) {
     },
   };
 }
+
+const candidate = "b".repeat(40);
+const digest = "c".repeat(64);
+function request(id = 10, head = sha) {
+  return {
+    id,
+    user: { id: 202 },
+    updated_at: "2026-09-10T12:00:00Z",
+    body: `<!-- agent-prepush:v1\nowner: hermes\nbranch: hermes/example\nexpected-head: ${head}\ncandidate-sha: ${candidate}\nbundle-sha256: ${digest}\n-->`,
+  };
+}
+function prepushFixture(enabled?: boolean) {
+  const settings = { ...config, ...(enabled === undefined ? {} : { prepushEnabled: enabled }) };
+  const f = fixture(settings);
+  f.state.body =
+    "<!-- agent-handoff:v1\norigin: hermes\nowner: hermes\nreviewer: codex\nimpacts: website\n-->";
+  f.state.labels = ["agent:hermes"];
+  f.state.comments = [request()];
+  return f;
+}
+describe("opt-in prepush through Desktop receipts", () => {
+  it("defaults off and accepts only a boolean opt-in", () => {
+    expect(CoordinationConfigSchema.parse(config)).toMatchObject({ prepushEnabled: false });
+    expect(CoordinationConfigSchema.safeParse({ ...config, prepushEnabled: true }).success).toBe(
+      true,
+    );
+    expect(CoordinationConfigSchema.safeParse({ ...config, prepushEnabled: "true" }).success).toBe(
+      false,
+    );
+  });
+  it.each([undefined, false])("leaves requests inert when opt-in is %s", async (enabled) => {
+    const f = prepushFixture(enabled);
+    await f.adapter.deliverToThread("test-thread", "untrusted", opts());
+    expect(f.sent).toEqual([]);
+  });
+  it("delivers only immutable bounded candidate data to the existing task", async () => {
+    const f = prepushFixture(true);
+    f.state.comments[0] = { ...request(), body: `${request().body}\nEVIL ${"x".repeat(50000)}` };
+    await f.adapter.deliverToThread("test-thread", "EVIL WEBHOOK", opts());
+    expect(f.sent).toHaveLength(1);
+    const prompt = String(f.sent[0]?.prompt);
+    expect(prompt).toContain("Action: prepush");
+    expect(prompt).not.toContain("EVIL");
+    expect(prompt.length).toBeLessThan(8000);
+    const data = JSON.parse(
+      prompt.split("BEGIN UNTRUSTED CANDIDATE DATA\n")[1]?.split("\nEND")[0] ?? "null",
+    );
+    expect(data).toEqual({
+      repository: "example/project",
+      number: 7,
+      owner: "hermes",
+      branch: "hermes/example",
+      expectedHead: sha,
+      candidateSha: candidate,
+      bundleSha256: digest,
+    });
+    expect(f.reads.at(-1)).toBe("repos/example/project/pulls/7");
+  });
+  it.each([101, 999])("ignores forged requests from author %s", async (author) => {
+    const f = prepushFixture(true);
+    f.state.comments = [{ ...request(), user: { id: author } }];
+    await f.adapter.deliverToThread("test-thread", "wake", opts());
+    expect(f.sent).toEqual([]);
+  });
+  it.each([
+    "blocked:coordination",
+    "review:codex",
+    "changes-requested:hermes",
+    "approved:hermes",
+    "waiting:charles",
+  ])("does not bypass %s", async (label) => {
+    const f = prepushFixture(true);
+    f.state.labels.push(label);
+    await f.adapter.deliverToThread("test-thread", "wake", opts());
+    expect(f.sent.every((message) => !String(message.prompt).includes("Action: prepush"))).toBe(
+      true,
+    );
+    if (label === "review:codex") expect(f.sent[0]?.prompt).toContain("Action: review");
+  });
+  it("selects newer stale request before matching head, without resurrecting an older request", async () => {
+    const f = prepushFixture(true);
+    f.state.comments.push(request(11, "d".repeat(40)));
+    await f.adapter.deliverToThread("test-thread", "wake", opts());
+    expect(f.sent).toEqual([]);
+  });
+  it.each(["duplicate", "unknown", "withdrawn", "same", "branch"])(
+    "fails closed for %s request",
+    async (change) => {
+      const f = prepushFixture(true);
+      const newer = request(11);
+      if (change === "duplicate") newer.body += newer.body;
+      if (change === "unknown") newer.body = newer.body.replace("-->", "command: unsafe\n-->");
+      if (change === "withdrawn") newer.body = "<!-- agent-prepush:v1 withdrawn -->";
+      if (change === "same") newer.body = newer.body.replace(candidate, sha);
+      if (change === "branch") f.state.branch = "hermes/other";
+      f.state.comments.push(newer);
+      await f.adapter.deliverToThread("test-thread", "wake", opts());
+      expect(f.sent).toEqual([]);
+    },
+  );
+  it("deduplicates across restart, comment identity, timestamp and prose edits", async () => {
+    const f = prepushFixture(true);
+    await f.adapter.deliverToThread("test-thread", "wake", opts());
+    f.adapter.close();
+    f.state.comments = [
+      {
+        ...request(99),
+        updated_at: "2026-09-10T13:00:00Z",
+        body: `${request().body}\nChanged prose`,
+      },
+    ];
+    await f.make().deliverToThread("test-thread", "wake", opts("second"));
+    expect(f.sent).toHaveLength(1);
+    f.state.comments = [
+      { ...request(100), body: request().body.replace(candidate, "d".repeat(40)) },
+    ];
+    await f.make().deliverToThread("test-thread", "wake", opts("third"));
+    expect(f.sent).toHaveLength(2);
+  });
+  it("uses a separate logical key containing every immutable candidate fact", async () => {
+    const f = prepushFixture(true);
+    const inner = new CodexDesktopAdapter(f.desktopConfig, f.client);
+    cleanup.push(() => inner.close());
+    const deliver = vi.spyOn(inner, "deliverToThread");
+    const adapter = new CoordinationAdapter(
+      { ...config, prepushEnabled: true },
+      f.snapshots,
+      inner,
+    );
+    await adapter.deliverToThread("test-thread", "wake", opts());
+    const expected = {
+      repository: "example/project",
+      number: 7,
+      owner: "hermes",
+      branch: "hermes/example",
+      expectedHead: sha,
+      candidateSha: candidate,
+      bundleSha256: digest,
+    };
+    expect(deliver.mock.calls[0]?.[2].deliveryId).toBe(
+      `prepush:v1:${createHash("sha256").update(JSON.stringify(expected)).digest("hex")}`,
+    );
+    f.state.comments = [{ ...request(), body: request().body.replace(digest, "d".repeat(64)) }];
+    await adapter.deliverToThread("test-thread", "wake", opts("digest"));
+    f.state.branch = "hermes/other";
+    f.state.comments = [
+      { ...request(), body: request().body.replace("hermes/example", f.state.branch) },
+    ];
+    await adapter.deliverToThread("test-thread", "wake", opts("branch"));
+    f.state.head = "d".repeat(40);
+    f.state.comments = [
+      {
+        ...request(10, f.state.head),
+        body: request(10, f.state.head).body.replace("hermes/example", f.state.branch),
+      },
+    ];
+    await adapter.deliverToThread("test-thread", "wake", opts("head"));
+    f.state.associations.push(8);
+    await adapter.deliverToThread("test-thread", "wake", {
+      ...opts("pr"),
+      event: { ...event("pr"), payload: { repo: config.expectedRepository, number: 8 } },
+    });
+    expect(f.sent).toHaveLength(5);
+    expect(new Set(deliver.mock.calls.map((call) => call[2].deliveryId)).size).toBe(5);
+  });
+  it("refetches on busy retry and suppresses a stale candidate", async () => {
+    const f = prepushFixture(true);
+    f.state.desktop = "active";
+    await expect(f.adapter.deliverToThread("test-thread", "wake", opts())).rejects.toThrow(/busy/i);
+    f.state.desktop = "idle";
+    f.state.head = "d".repeat(40);
+    await f.adapter.deliverToThread("test-thread", "wake", opts());
+    expect(f.sent).toEqual([]);
+  });
+  it("retains uncertain-send fencing despite equivalent edited requests", async () => {
+    const f = prepushFixture(true);
+    f.state.failSend = true;
+    await expect(f.adapter.deliverToThread("test-thread", "wake", opts())).rejects.toThrow(
+      /uncertain/i,
+    );
+    f.state.failSend = false;
+    f.state.comments = [request(99)];
+    await expect(f.make().deliverToThread("test-thread", "wake", opts("second"))).rejects.toThrow(
+      /uncertain/i,
+    );
+    expect(f.sent).toHaveLength(1);
+  });
+  it("preserves ordinary readiness with prepush enabled", async () => {
+    const f = fixture({ ...config, ...{ prepushEnabled: true } });
+    f.state.comments.push(request());
+    await f.adapter.deliverToThread("test-thread", "wake", opts());
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]?.prompt).toContain("Action: ready");
+  });
+});
 
 describe("private registration opt-in", () => {
   it.each([false, true])("wraps only explicit coordination registration: %s", (enabled) => {

@@ -47,6 +47,26 @@ const check = (id: number, conclusion = "success", status = "completed") => ({
 });
 
 describe("fresh GitHub snapshot", () => {
+  it("reads optional head.ref while preserving snapshots without it", async () => {
+    const f = fixture();
+    expect(await f.client.read(7)).not.toHaveProperty("headBranch");
+    f.data["pulls/7"] = { ...f.pr, head: { ...f.pr.head, ref: "hermes/example" } };
+    expect(await f.client.read(7)).toMatchObject({ headBranch: "hermes/example" });
+  });
+  it("rejects a branch-only race during snapshot collection", async () => {
+    const f = fixture();
+    let reads = 0;
+    const client = new GithubSnapshotClient("example/project", async (url) => {
+      const raw = await f.transport(url);
+      if (url.endsWith("pulls/7"))
+        return {
+          ...f.pr,
+          head: { ...f.pr.head, ref: ++reads === 1 ? "hermes/example" : "hermes/other" },
+        };
+      return raw;
+    });
+    await expect(client.read(7)).rejects.toThrow(/changed/i);
+  });
   it("resolves every exact open commit association in numeric order after current-PR validation", async () => {
     const f = fixture();
     f.data[`commits/${sha}/pulls?per_page=100&page=1`] = [
