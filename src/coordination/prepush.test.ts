@@ -38,6 +38,63 @@ function snapshot(): CoordinationSnapshot {
 }
 
 describe("trusted candidate selection", () => {
+  const revision = () => ({
+    ...request(
+      2,
+      `<!-- agent-review:v1\nreviewer: codex\ndecision: revise\nhead-sha: ${head}\n-->`,
+      "2026-09-10T09:00:00Z",
+    ),
+    authorId: "101",
+  });
+  const correction = () => ({
+    ...snapshot(),
+    labels: ["agent:hermes", "changes-requested:hermes"],
+    comments: [revision(), request(3)],
+  });
+  it("selects a fresh correction while preserving the rejected head and labels", () => {
+    const s = correction();
+    const before = structuredClone(s);
+    expect(selectPrepush(s, config)?.candidateSha).toBe(candidate);
+    expect(s).toEqual(before);
+    expect(evaluateCoordination(s, config).action).toBe("wait");
+    expect(evaluateCoordination(s, { ...config, localAgent: "hermes" }).action).toBe("fix");
+  });
+  it.each([
+    "blocked:coordination",
+    "blocked:manual",
+    "waiting:operator",
+    "review:codex",
+    "approved:codex",
+    "changes-requested:codex",
+  ])("correction never bypasses %s", (label) => {
+    const s = correction();
+    s.labels.push(label);
+    expect(selectPrepush(s, config)).toBeNull();
+  });
+  it.each(["approve", "reject"])("requires revise, not %s", (verdict) => {
+    const s = correction();
+    s.comments[0] = {
+      ...revision(),
+      body: revision().body.replace("decision: revise", `decision: ${verdict}`),
+    };
+    expect(selectPrepush(s, config)).toBeNull();
+  });
+  it("rejects untrusted, stale and malformed review evidence", () => {
+    for (const change of [
+      { authorId: "999" },
+      { body: revision().body.replace(head, "e".repeat(40)) },
+      { body: "agent-review malformed" },
+    ]) {
+      const s = correction();
+      s.comments[0] = { ...revision(), ...change };
+      expect(selectPrepush(s, config)).toBeNull();
+    }
+  });
+  it("does not revive a candidate submitted before the latest review", () => {
+    const s = correction();
+    s.comments[0] = { ...revision(), updatedAt: "2026-09-10T11:00:00Z" };
+    expect(selectPrepush(s, config)).toBeNull();
+  });
   it("selects exact immutable facts without changing ordinary policy", () => {
     const s = snapshot();
     const before = structuredClone(s);

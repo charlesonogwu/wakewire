@@ -77,6 +77,11 @@ export function selectPrepushRequest(
 ): PrepushCandidate | null {
   if (config.prepushEnabled !== true || config.localAgent !== "codex") return null;
   const decision = evaluateCoordination(snapshot, config);
+  // A correction is testable without clearing the rejected old head. Reuse the
+  // owner policy to require a trusted current-head Revise, never a manual block.
+  const correction =
+    snapshot.labels.includes("changes-requested:hermes") &&
+    evaluateCoordination(snapshot, { ...config, localAgent: "hermes" }).action === "fix";
   if (
     decision.action !== "wait" ||
     decision.owner !== "hermes" ||
@@ -87,7 +92,8 @@ export function selectPrepushRequest(
     snapshot.labels.some(
       (label) =>
         label === config.waitingLabel ||
-        /^(review|changes-requested|approved|blocked|waiting):/.test(label),
+        (/^(review|changes-requested|approved|blocked|waiting):/.test(label) &&
+          !(correction && label === "changes-requested:hermes")),
     )
   )
     return null;
@@ -114,6 +120,20 @@ export function selectPrepushRequest(
       latest = { request, time, id: comment.id };
   }
   const request = latest?.request;
+  // A later review invalidates an already-exported correction. Require a fresh
+  // owner submission rather than resurrecting an earlier candidate automatically.
+  if (
+    correction &&
+    latest &&
+    snapshot.comments.some(
+      (comment) =>
+        comment.body.includes("agent-review") &&
+        Object.values(config.trustedAuthorIds).some((ids) => ids.includes(comment.authorId)) &&
+        (Date.parse(comment.updatedAt) > latest.time ||
+          (Date.parse(comment.updatedAt) === latest.time && comment.id >= latest.id)),
+    )
+  )
+    return null;
   return request &&
     request.expectedHead === snapshot.headSha &&
     request.branch === snapshot.headBranch &&
