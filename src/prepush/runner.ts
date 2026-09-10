@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, mkdir, open, realpath, rename, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { lstat, open, rename, stat } from "node:fs/promises";
+import { join } from "node:path";
 import { GithubSnapshotClient } from "../coordination/github.js";
 import type { CoordinationSnapshot } from "../coordination/policy.js";
 import { type PrepushCandidate, selectPrepushRequest } from "../coordination/prepush.js";
@@ -9,12 +9,14 @@ import { type PrepushConfig, PrepushConfigSchema } from "./config.js";
 import { type VerificationInput, type VerificationOutcomes, verifyInDocker } from "./docker.js";
 import { GitRemote, git, type Remote, validateCandidate } from "./git.js";
 import { command, gitEnvironment, hostEnvironment } from "./process.js";
+import { createCandidateDirectory, type DirectorySync, syncDirectory } from "./state.js";
 
 export interface RunnerDependencies {
   snapshot(pr: number): Promise<CoordinationSnapshot>;
   transfer(host: string, path: string, target: string): Promise<void>;
   verify(input: VerificationInput): Promise<VerificationOutcomes>;
   remote: Remote;
+  directorySync?: DirectorySync;
 }
 export interface PrepushResult extends VerificationOutcomes {
   pr: number;
@@ -39,7 +41,11 @@ export function candidateKey(repository: string, pr: number, request: PrepushCan
     )
     .digest("hex");
 }
-async function journal(directory: string, result: PrepushResult) {
+async function journal(
+  directory: string,
+  result: PrepushResult,
+  sync: DirectorySync = syncDirectory,
+) {
   const temporary = join(directory, "journal.next");
   const file = await open(temporary, "wx", 0o600);
   try {
@@ -49,37 +55,7 @@ async function journal(directory: string, result: PrepushResult) {
     await file.close();
   }
   await rename(temporary, join(directory, "journal.json"));
-  // POSIX directory fsync makes the rename durable before any network push.
-  if (process.platform !== "win32") {
-    const dir = await open(directory, "r");
-    try {
-      await dir.sync();
-    } finally {
-      await dir.close();
-    }
-  }
-}
-async function privateDirectory(root: string, key: string) {
-  await mkdir(root, { recursive: true, mode: 0o700 });
-  const info = await lstat(root);
-  if (
-    !info.isDirectory() ||
-    info.isSymbolicLink() ||
-    resolve(await realpath(root)) !== resolve(root) ||
-    (process.platform !== "win32" && ((info.mode & 0o077) !== 0 || info.uid !== process.getuid?.()))
-  )
-    throw new Error("state-root-not-private");
-  const directory = join(root, key);
-  // Existing directories and uncertain locks are never recovered automatically.
-  await mkdir(directory, { mode: 0o700 });
-  const lock = await open(join(directory, "lock"), "wx", 0o600);
-  try {
-    await lock.writeFile(`${process.pid}\n`);
-    await lock.sync();
-  } finally {
-    await lock.close();
-  }
-  return directory;
+  await sync(directory);
 }
 function defaults(config: PrepushConfig): RunnerDependencies {
   const github = new GithubSnapshotClient(config.coordination.expectedRepository);
@@ -133,7 +109,7 @@ export async function runPrepush(
   };
   if (!request) return result;
   const key = candidateKey(config.coordination.expectedRepository, pr, request);
-  const directory = await privateDirectory(config.stateRoot, key);
+  const directory = await createCandidateDirectory(config.stateRoot, key, deps.directorySync);
   result.directory = directory;
   result.logPath = join(directory, "verification.log");
   const log = await open(result.logPath, "wx", 0o600);
@@ -143,7 +119,7 @@ export async function runPrepush(
   let phase = "fetching";
   try {
     result.state = "fetching";
-    await journal(directory, result);
+    await journal(directory, result, deps.directorySync);
     const bundle = join(directory, "candidate.bundle");
     await deps.transfer(
       config.exportHost,
@@ -194,7 +170,7 @@ export async function runPrepush(
     )
       throw new Error(phase);
     result.state = "verified";
-    await journal(directory, result);
+    await journal(directory, result, deps.directorySync);
     phase = "authorization-changed";
     const current = selectPrepushRequest(await deps.snapshot(pr), config.coordination);
     if (!current || candidateKey(config.coordination.expectedRepository, pr, current) !== key)
@@ -203,7 +179,7 @@ export async function runPrepush(
     if ((await deps.remote.head(request.branch)) !== request.expectedHead) throw new Error(phase);
     await git(repo, ["merge-base", "--is-ancestor", request.expectedHead, request.candidateSha]);
     result.state = "pushing";
-    await journal(directory, result);
+    await journal(directory, result, deps.directorySync);
     pushStarted = true;
     try {
       await deps.remote.push(repo, request);
@@ -218,11 +194,11 @@ export async function runPrepush(
     }
     result.state = result.readback === "candidate" ? "pushed" : "uncertain";
     result.reason = result.state === "uncertain" ? "push-readback" : null;
-    await journal(directory, result);
+    await journal(directory, result, deps.directorySync);
   } catch {
     result.state = pushStarted ? "uncertain" : "failed";
     result.reason = phase;
-    await journal(directory, result);
+    await journal(directory, result, deps.directorySync);
   }
   return result;
 }

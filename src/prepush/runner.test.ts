@@ -77,6 +77,7 @@ async function fixture(change = "normal") {
     image: `node@sha256:${"a".repeat(64)}`,
     trustedAuthorEmail: "agent@example.invalid",
   });
+  await mkdir(config.stateRoot, { mode: 0o700 });
   const snapshot: CoordinationSnapshot = {
     repository: "example/project",
     headRepository: "example/project",
@@ -135,6 +136,40 @@ async function fixture(change = "normal") {
 }
 
 describe("isolated candidate runner", () => {
+  it("parent directory sync failure prevents transfer, verification and push", async () => {
+    const f = await fixture();
+    f.deps.directorySync = async (path) => {
+      if (path === f.config.stateRoot) throw new Error("parent-sync-failed");
+    };
+    await expect(runPrepush(f.config, 7, f.deps)).rejects.toThrow("parent-sync-failed");
+    expect(f.counts()).toEqual({ transfers: 0, containers: 0, pushes: 0 });
+  });
+  it("syncs the parent fence before work and the pushing journal before remote push", async () => {
+    const f = await fixture();
+    const events: string[] = [];
+    f.deps.directorySync = async (path) => {
+      if (path === f.config.stateRoot) events.push("parent");
+      else {
+        try {
+          events.push(JSON.parse(await readFile(join(path, "journal.json"), "utf8")).state);
+        } catch {
+          events.push("lock");
+        }
+      }
+    };
+    const transfer = f.deps.transfer;
+    f.deps.transfer = async (...args) => {
+      expect(events).toEqual(["lock", "parent", "fetching"]);
+      await transfer(...args);
+    };
+    const push = f.deps.remote.push;
+    f.deps.remote.push = async (...args) => {
+      expect(events).toEqual(["lock", "parent", "fetching", "verified", "pushing"]);
+      await push(...args);
+    };
+    expect((await runPrepush(f.config, 7, f.deps)).state).toBe("pushed");
+    expect(events.at(-1)).toBe("pushed");
+  });
   it("archives every tracked file despite candidate export-ignore attributes", async () => {
     const f = await fixture("attributes");
     f.deps.verify = async (input) => {
@@ -226,6 +261,23 @@ describe("isolated candidate runner", () => {
       tests: 0,
       build: 19,
       guard: null,
+    });
+    expect(f.counts().pushes).toBe(0);
+  });
+  it("preserves the dependency stage's actual exit and never pushes", async () => {
+    const f = await fixture();
+    f.deps.verify = async () => ({
+      tests: null,
+      build: null,
+      guard: null,
+      integrity: null,
+      failedStage: "install",
+      exitCode: 7,
+    });
+    expect(await runPrepush(f.config, 7, f.deps)).toMatchObject({
+      state: "failed",
+      failedStage: "install",
+      exitCode: 7,
     });
     expect(f.counts().pushes).toBe(0);
   });

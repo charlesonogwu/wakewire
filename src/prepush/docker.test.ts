@@ -23,12 +23,41 @@ async function harness(failedStage = -1, code = 1) {
   const calls: { args: string[]; timeout: number | undefined }[] = [];
   let creates = 0;
   let starts = 0;
+  const effectiveEnvironments = new Map<string, string[]>();
   const execute: Command = async (file, args, options) => {
     expect(file).toBe("docker");
     calls.push({ args, timeout: options?.timeout });
     let stdout = "";
     let exit = 0;
-    if (args[0] === "create") stdout = String(++creates).repeat(64);
+    if (args[0] === "create") {
+      stdout = String(++creates).repeat(64);
+      const env = Object.fromEntries(
+        [
+          "HTTP_PROXY",
+          "HTTPS_PROXY",
+          "FTP_PROXY",
+          "ALL_PROXY",
+          "NO_PROXY",
+          "http_proxy",
+          "https_proxy",
+          "ftp_proxy",
+          "all_proxy",
+          "no_proxy",
+        ].map((key) => [key, "https://synthetic:credential@proxy.invalid"]),
+      );
+      for (let n = 0; n < args.length; n++)
+        if (args[n] === "--env") {
+          const assignment = args[n + 1] ?? "";
+          const equal = assignment.indexOf("=");
+          if (equal >= 0) env[assignment.slice(0, equal)] = assignment.slice(equal + 1);
+        }
+      effectiveEnvironments.set(
+        stdout,
+        Object.entries(env).map(([key, value]) => `${key}=${value}`),
+      );
+    }
+    if (args[0] === "inspect")
+      stdout = JSON.stringify(effectiveEnvironments.get(args.at(-1) ?? ""));
     if (args[0] === "start") {
       const stage = starts++;
       exit = stage === failedStage ? code : 0;
@@ -64,6 +93,20 @@ describe("container isolation boundary", () => {
       expect(args).toContain("--memory=2g");
       expect(args).toContain("--cpus=2");
       expect(args).not.toContain("--privileged");
+      for (const key of [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "FTP_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "ftp_proxy",
+        "all_proxy",
+        "no_proxy",
+      ])
+        expect(args).toContain(`${key}=`);
+      expect(args).toContain("NODE_OPTIONS=");
       expect(args.join(" ")).not.toMatch(
         /docker\.sock|SSH_AUTH_SOCK|GH_TOKEN|GITHUB_TOKEN|\/root|\/home|--env-file|--network=host/,
       );
@@ -83,10 +126,20 @@ describe("container isolation boundary", () => {
       expect(args).not.toContain("--cap-add=CHOWN");
     }
     expect(install).not.toContain("--network=none");
-    expect(install.at(-1)).toBe("npm ci --ignore-scripts --no-audit --no-fund");
+    expect(install.at(-1)).toContain("--ignore-scripts=true");
+    expect(install.at(-1)).toContain("ci --no-audit --no-fund");
     expect(install.filter((a) => a.startsWith("type=bind"))).toEqual([]);
     expect(verify).toContain("--network=none");
-    expect(verify.at(-1)).toBe("npm test && npm run build && npm run verify:push");
+    const commands = verify.at(-1)?.split(" && ") ?? [];
+    expect(commands).toHaveLength(3);
+    for (const cmd of commands) {
+      expect(cmd).toContain("--script-shell=/bin/sh");
+      expect(cmd).toContain("--node-options=");
+      expect(cmd).toContain("--ignore-scripts=false");
+      expect(cmd).toContain("--workspaces=false");
+      expect(cmd).toContain("--if-present=false");
+    }
+    expect(commands[2]).toMatch(/ run verify:push$/);
     for (const env of [
       "CI=1",
       "GIT_DIR=/git",
@@ -127,12 +180,44 @@ describe("container isolation boundary", () => {
   });
   it("dependency failure prevents verification and removes exact owned resources", async () => {
     const h = await harness(2, 7);
-    await expect(verifyInDocker(h.input, h.execute)).rejects.toThrow("install");
+    expect(await verifyInDocker(h.input, h.execute)).toMatchObject({
+      failedStage: "install",
+      exitCode: 7,
+      tests: null,
+      build: null,
+      guard: null,
+      integrity: null,
+    });
     expect(h.calls.filter((c) => c.args[0] === "create")).toHaveLength(3);
     expect(h.calls.filter((c) => c.args[0] === "rm").map((c) => c.args[2])).toEqual([
       "1".repeat(64),
       "2".repeat(64),
       "3".repeat(64),
+    ]);
+  });
+  it("fails closed before starting when inspected daemon environment retains a proxy credential", async () => {
+    const h = await harness();
+    const execute: Command = async (...args) => {
+      const result = await h.execute(...args);
+      if (args[1][0] === "inspect")
+        result.stdout = JSON.stringify([
+          "HTTP_PROXY=https://synthetic:credential@proxy.invalid",
+          "HTTPS_PROXY=",
+          "FTP_PROXY=",
+          "ALL_PROXY=",
+          "NO_PROXY=",
+          "http_proxy=",
+          "https_proxy=",
+          "ftp_proxy=",
+          "all_proxy=",
+          "no_proxy=",
+        ]);
+      return result;
+    };
+    await expect(verifyInDocker(h.input, execute)).rejects.toThrow("proxy-environment");
+    expect(h.calls.some((call) => call.args[0] === "start")).toBe(false);
+    expect(h.calls.filter((call) => call.args[0] === "rm").map((call) => call.args[2])).toEqual([
+      "1".repeat(64),
     ]);
   });
   it("reports actual failed verification exit without inventing per-stage success", async () => {

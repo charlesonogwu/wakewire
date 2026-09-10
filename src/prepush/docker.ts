@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { open } from "node:fs/promises";
 import { integrityScript } from "./integrity.js";
+import { installCommand, verificationCommand } from "./npm.js";
 import { type Command, command, hostEnvironment } from "./process.js";
 
 export interface VerificationOutcomes {
@@ -9,6 +10,7 @@ export interface VerificationOutcomes {
   guard: number | null;
   integrity: number | null;
   exitCode?: number;
+  failedStage?: "install";
 }
 export interface VerificationInput {
   repo: string;
@@ -21,6 +23,32 @@ export interface VerificationInput {
 
 function requireSuccess(code: number, reason: string) {
   if (code !== 0) throw new Error(reason);
+}
+
+const proxyKeys = [
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "FTP_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "ftp_proxy",
+  "all_proxy",
+  "no_proxy",
+];
+
+function requireEmptyProxies(output: string) {
+  const env: unknown = JSON.parse(output);
+  if (
+    !Array.isArray(env) ||
+    !env.every((value) => typeof value === "string") ||
+    proxyKeys.some((key) => {
+      const values = env.filter((value) => value.startsWith(`${key}=`));
+      return values.length !== 1 || values[0] !== `${key}=`;
+    })
+  )
+    throw new Error("docker-proxy-environment");
 }
 
 export async function verifyInDocker(
@@ -42,6 +70,9 @@ export async function verifyInDocker(
     "--cpus=2",
     "--tmpfs=/tmp:rw,nosuid,nodev,size=512m",
     "--workdir=/work",
+    ...proxyKeys.flatMap((key) => ["--env", `${key}=`]),
+    "--env",
+    "NODE_OPTIONS=",
   ];
   const user = [
     "--user=1000:1000",
@@ -67,6 +98,11 @@ export async function verifyInDocker(
     const id = created.stdout.trim();
     if (created.code !== 0 || !/^[a-f0-9]{64}$/.test(id)) throw new Error(`docker-create-${name}`);
     try {
+      // Client-config proxies are injected without appearing in our argv.
+      // Validate actual daemon-side Env before any candidate process starts.
+      const inspected = await docker(["inspect", "--format", "{{json .Config.Env}}", id]);
+      requireSuccess(inspected.code, "docker-proxy-environment");
+      requireEmptyProxies(inspected.stdout);
       const result = await docker(["start", "--attach", id], timeout);
       await log.writeFile(`\n[${name}] exit=${result.code}\n${result.stdout}\n${result.stderr}\n`);
       return result;
@@ -130,19 +166,17 @@ export async function verifyInDocker(
     const baseline = await stage("baseline", offline, manifestArgs, 120_000);
     if (baseline.code !== 0 || !/^[a-f0-9]{64}$/.test(baseline.stdout))
       throw new Error("docker-baseline");
-    const install = await stage(
-      "install",
-      user,
-      "npm ci --ignore-scripts --no-audit --no-fund",
-      10 * 60_000,
-    );
-    if (install.code !== 0) throw new Error("docker-install");
-    const verified = await stage(
-      "verification",
-      offline,
-      "npm test && npm run build && npm run verify:push",
-      20 * 60_000,
-    );
+    const install = await stage("install", user, installCommand, 10 * 60_000);
+    if (install.code !== 0)
+      return {
+        tests: null,
+        build: null,
+        guard: null,
+        integrity: null,
+        exitCode: install.code,
+        failedStage: "install",
+      };
+    const verified = await stage("verification", offline, verificationCommand, 20 * 60_000);
     const code = verified.code;
     // Both byte manifests are emitted by trusted Node in fresh offline
     // containers. The baseline lives only in host memory, never in /work.
