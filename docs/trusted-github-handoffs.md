@@ -111,6 +111,13 @@ until the runner has been independently verified. Docker must already be
 available; the runner must not repair Docker, reset data or install a different
 container engine automatically.
 
+Provision the state root before running the CLI: owner-only permissions on POSIX,
+or an owner/SYSTEM-only ACL on Windows. The runner does not create missing parent
+directories. POSIX candidate-directory entries are synced before proceeding.
+Windows retains exclusive locks and file flushes, but portable directory flushing
+and automatic power-loss recovery are not claimed; inspect journals and remote
+state after an uncertain interruption.
+
 Run the compiled entrypoint with the locally approved configuration and PR number:
 
 ```sh
