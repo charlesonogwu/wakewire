@@ -96,6 +96,50 @@ GitHub HMAC secret. Point the tunnel at this dedicated port, **not the managemen
 API port**. Unknown paths are not forwarded to management. No tunnel or GitHub
 hook is installed merely by these code changes.
 
+## Unpublished candidate verification
+
+The optional `prepushEnabled` coordination setting recognizes a separate
+`agent-prepush:v1` envelope from the configured trusted peer author. It is not
+an approval envelope. It names only the current assigned branch, expected old
+head, candidate commit and bundle digest. Unknown fields, changed ownership,
+workflow blocks, stale heads and ambiguous requests cannot authorize a push.
+
+Configure the candidate CLI separately in a private file. Its peer host, export
+root, local state root, digest-pinned Docker image and trusted author identity
+come from that file, never from a GitHub comment. Keep listener prepush disabled
+until the runner has been independently verified. Docker must already be
+available; the runner must not repair Docker, reset data or install a different
+container engine automatically.
+
+Run the compiled entrypoint with the locally approved configuration and PR number:
+
+```sh
+node dist/prepush-cli.js --config /absolute/private/prepush.json --pr 123
+```
+
+The CLI fetches fresh GitHub evidence itself; it does not accept a candidate SHA,
+shell command, or export path from its command line. No eligible request returns
+`skipped` before fetching an artifact. A successful result reports `pushed` only
+after reading the exact candidate back from the assigned remote branch.
+
+The peer exports a single-ref Git bundle under its SHA-256 filename. The desktop
+verifies bytes, Git refs, ancestry and the current PR before executing code.
+Dependency download is separated from offline testing. Build containers receive
+neither host credentials nor the Docker socket. Test/build success remains
+separate from both reviewer approvals. Only the exact tested commit may be
+pushed with an unchanged-old-head guard; uncertain outcomes require readback.
+
+The runner measures the extracted tracked files before dependency installation
+and again after testing, using fresh offline containers. Changes to tracked
+contents, modes, or paths prevent pushing; untracked generated build outputs are
+allowed. Candidate directories and journals are retained privately. An existing
+candidate directory, interrupted operation, or uncertain result is not retried
+blindly: inspect its journal and the remote branch before any recovery.
+
+Existing owner tasks must be explicitly configured to export and await this
+verification stage instead of pushing first. Merely enabling a webhook does
+not change those tasks or authorize deployment of their business changes.
+
 Received events are durably queued. Events GitHub could not deliver while the
 receiver was offline require explicit reconciliation; do not assume automatic
 GitHub redelivery. Likewise, an uncertain Desktop acceptance requires inspection,
