@@ -108,6 +108,40 @@ describe("DeliveryQueue", () => {
     });
     route = stores.routes.create(routeInput());
   });
+  it("preserves delivery identities when the adapter forbids digest coalescing", async () => {
+    Object.assign(adapter, { supportsCoalescing: false });
+    const r = stores.routes.create(routeInput({ name: "durable", rateLimitPerMinute: 1 }));
+    queue.enqueueEvent(r, makeEvent("d-prior"));
+    await queue.tick();
+    queue.enqueueEvent(r, makeEvent("d-recovered"));
+    queue.enqueueEvent(r, makeEvent("d-newer"));
+    await queue.tick();
+    await queue.tick();
+    expect(stores.deliveries.list({ status: "coalesced" })).toHaveLength(0);
+    expect(adapter.calls).toHaveLength(3);
+    expect(adapter.calls[1]?.prompt).not.toContain("d-newer");
+  });
+  it("rejects unsupported new-thread targets before worktree preparation", async () => {
+    Object.assign(adapter, { supportsNewThreads: false });
+    let preparations = 0;
+    const q = new DeliveryQueue(stores, adapter, logger, {
+      autoWake: false,
+      prepareWorktree: async () => {
+        preparations++;
+        return "/tmp/repo";
+      },
+    });
+    const r = stores.routes.create(
+      routeInput({
+        name: "unsupported",
+        target: { type: "new-thread", cwd: "/tmp/repo", worktree: true },
+      }),
+    );
+    q.enqueueEvent(r, makeEvent("d-new"));
+    await q.tick();
+    expect(preparations).toBe(0);
+    expect(adapter.calls).toHaveLength(0);
+  });
 
   it("delivers a queued event with the safety envelope and route sandbox", async () => {
     const delivery = queue.enqueueEvent(route, makeEvent("d-1"));

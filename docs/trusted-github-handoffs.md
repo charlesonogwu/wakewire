@@ -28,13 +28,33 @@ not implement that policy or authorize production operations.
 
 ## Windows Desktop integration status
 
-This change does **not** enable safe automatic delivery to a conversation that
-is already loaded by another Codex Desktop runtime. A separately spawned
-app-server can have its own in-memory view of the same persisted thread.
-Checking that server's status is not a cross-process reservation.
+An experimental `codex-desktop` adapter uses the installed bundled Desktop MCP
+connector's `read_thread` and `send_message_to_thread` tools. It never starts an
+app-server or loads a separate copy of the conversation. Desktop owns admission
+and execution; a successful result means message acceptance, not completed work.
 
-The required next integration is delivery through the existing Desktop owner,
-with serialized admission and completion correlated to the exact turn. Do not
-treat hook timers, file-age checks, or a private app-server as proof of exclusive
-ownership. Keep automatic delivery disabled until an isolated end-to-end probe
-verifies the owner-routed connection, interruption, retries, and deduplication.
+Registration must explicitly name one thread, its local workspace, a receipt
+database, the installed connector path and SHA-256, and the inherited local pipe.
+Set `WAKEWIRE_DESKTOP_REGISTRATION` to that local JSON file, with keys `threadId`,
+`cwd`, `stateFile`, `serverPath`, `serverSha256`, `pipePath`, and
+`inheritPermissions: true`. Never commit this file. Protect it with owner-only
+filesystem permissions. App updates or restarts may require registration again.
+This integration depends on the installed connector and is not a stable public
+Desktop webhook API.
+
+Only existing local threads and explicitly opted-in `workspace-write` routes
+are supported. **Desktop's existing permissions are inherited**; this adapter
+cannot enforce a narrower sandbox. It rejects read-only routes rather than
+silently weakening them. Keep model settings unchanged. Unknown state or a busy
+conversation postpones delivery. Missing/wrong thread or workspace is rejected.
+
+SQLite records a durable fence before submission. A dropped response or crash
+leaves the delivery uncertain and blocks automatic resend; inspect the target
+conversation and reconcile manually. Do not delete uncertain receipts to retry.
+The existing queue's delivery identifier is passed through to this ledger.
+
+The local diagnostic `scripts/desktop-connection-probe.mjs` accepts an installed
+connector path and, optionally, `--send-once`. Without that flag it only probes
+reachability. With it, one fixed synthetic message is sent after the calling
+conversation becomes idle, at most once per thread, with a ten-minute deadline.
+It does not install a daemon, register webhooks, or enable business handoffs.

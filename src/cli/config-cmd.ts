@@ -5,7 +5,8 @@ import { createStores } from "../db/repos.js";
 import { assertLoopbackWsUrl } from "../sinks/codex-app-server.js";
 
 const KNOWN: Record<string, string> = {
-  [settingKeys.adapter]: "codex sink: codex-app-server (default) | codex-sdk | codex-exec",
+  [settingKeys.adapter]:
+    "codex sink: codex-app-server (default) | codex-sdk | codex-exec | codex-desktop (experimental)",
   [settingKeys.codexPath]: "override the codex binary path",
   [settingKeys.model]: "model override for injected turns",
   [settingKeys.appServerConnection]: "app-server connection: auto (default) | proxy | spawn",
@@ -48,7 +49,9 @@ export async function configSet(key: string, value: string): Promise<void> {
   if (key === settingKeys.adapter) {
     const parsed = AdapterNameSchema.safeParse(value);
     if (!parsed.success) {
-      console.error(`invalid adapter "${value}" — use codex-sdk | codex-app-server | codex-exec`);
+      console.error(
+        `invalid adapter "${value}" — use codex-sdk | codex-app-server | codex-exec | codex-desktop`,
+      );
       process.exitCode = 1;
       return;
     }

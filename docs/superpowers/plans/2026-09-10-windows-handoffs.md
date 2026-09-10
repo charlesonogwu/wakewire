@@ -15,6 +15,14 @@
 
 ## Task 2: Desktop coexistence
 
+Implementation update: the installed bundled Desktop MCP connector was discovered
+and tested read-only, then with one harmless active-task message. The message was
+received by the same live Desktop conversation. The experimental adapter now uses
+that owner-routed connector, not hooks or a private app-server. It verifies one
+registered local task/workspace and uses a durable sending fence. Queue coalescing
+is disabled for this adapter to preserve receipt identities. Live GitHub ingress
+and unattended branch actions remain disabled. An idle-wake probe is still required.
+
 - [ ] Investigate supported Codex lifecycle hooks or shared-server coordination and document limitations with Windows runtime evidence.
 - [ ] Implement a narrowly scoped guard only if every participating turn can share the same authority. Missing registration, corrupt state, duplicate ownership or uncertain liveness must hold delivery rather than spawn competing work.
 - [ ] Test simultaneous acquisition, stale completion, interruption, process exit, and missing hook registration. Do not use elapsed time alone to declare a live worker dead.
