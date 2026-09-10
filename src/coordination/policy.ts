@@ -60,7 +60,7 @@ function parseEnvelope(body: string, marker: string, keys: readonly string[]) {
  * Shared account IDs cannot distinguish physical authors: reviewer markers identify
  * logical agents, so a shared account can cast both votes. Use separate IDs for
  * independently authenticated reviewers.
- * Labels: owner:AGENT, review:AGENT, changes-requested:AGENT, approved:AGENT,
+ * Labels: agent:AGENT, review:AGENT, changes-requested:AGENT, approved:AGENT,
  * blocked:coordination and the configured waiting label. Other labels are inert.
  */
 export function evaluateCoordination(
@@ -100,7 +100,7 @@ export function evaluateCoordination(
   }
   owner = handoff.owner;
   const peer = handoff.reviewer;
-  const ownerLabels = agents.map((agent) => `owner:${agent}`);
+  const ownerLabels = agents.map((agent) => `agent:${agent}`);
   const approvalLabels = agents.map((agent) => `approved:${agent}`);
   const workflows = agents.flatMap((agent) => [`review:${agent}`, `changes-requested:${agent}`]);
   if (
@@ -117,11 +117,11 @@ export function evaluateCoordination(
   if (
     labels.some(
       (label) =>
-        /^(owner|review|changes-requested|approved|blocked|waiting):/.test(label) &&
+        /^(agent|review|changes-requested|approved|blocked|waiting):/.test(label) &&
         !known.has(label),
     ) ||
     labels.filter((label) => ownerLabels.includes(label)).length !== 1 ||
-    !labels.includes(`owner:${owner}`) ||
+    !labels.includes(`agent:${owner}`) ||
     labels.filter((label) => workflows.includes(label)).length > 1 ||
     labels.filter((label) => approvalLabels.includes(label)).length > 1 ||
     labels.includes(`review:${owner}`) ||

@@ -22,7 +22,7 @@ function snapshot(overrides: Partial<CoordinationSnapshot> = {}): CoordinationSn
     headSha: sha,
     headRepository: "example/project",
     body: handoff,
-    labels: ["owner:codex"],
+    labels: ["agent:codex"],
     checks: "success",
     comments: [],
     ...overrides,
@@ -43,6 +43,16 @@ function vote(
 }
 const approvals = () => [vote("codex"), vote("hermes")];
 describe("pure dual-review policy", () => {
+  it.each([
+    { labels: ["agent:hermes", "impact:website"], action: "wait" },
+    { labels: ["agent:hermes", "impact:website", "review:codex"], action: "review" },
+  ])("accepts live-shaped synthetic agent ownership labels: $action", ({ labels, action }) => {
+    const input = snapshot({
+      body: "<!-- agent-handoff:v1\norigin: hermes\nowner: hermes\nreviewer: codex\nimpacts: website\n-->",
+      labels,
+    });
+    expect(evaluateCoordination(input, config)).toMatchObject({ action, owner: "hermes" });
+  });
   it.each([{ state: "closed" as const }, { repository: "other/project" }])(
     "ignores out-of-scope PRs %j",
     (input) => {
@@ -83,7 +93,7 @@ describe("pure dual-review policy", () => {
   it("does not request verification over manual blocks or current rejection", () => {
     expect(
       evaluateCoordination(
-        snapshot({ labels: ["owner:codex", "blocked:coordination"], comments: [vote("hermes")] }),
+        snapshot({ labels: ["agent:codex", "blocked:coordination"], comments: [vote("hermes")] }),
         config,
       ).action,
     ).toBe("blocked");
@@ -131,7 +141,7 @@ describe("pure dual-review policy", () => {
   });
   it("fixes a newer peer revision only for the local owner with matching label", () => {
     const input = snapshot({
-      labels: ["owner:codex", "changes-requested:codex"],
+      labels: ["agent:codex", "changes-requested:codex"],
       comments: [
         ...approvals(),
         vote("hermes", "revise", { id: 3, updatedAt: "2026-09-10T11:00:00Z" }),
@@ -139,7 +149,7 @@ describe("pure dual-review policy", () => {
     });
     expect(evaluateCoordination(input, config).action).toBe("fix");
     expect(evaluateCoordination(input, { ...config, localAgent: "hermes" }).action).toBe("wait");
-    expect(evaluateCoordination({ ...input, labels: ["owner:codex"] }, config).action).toBe("wait");
+    expect(evaluateCoordination({ ...input, labels: ["agent:codex"] }, config).action).toBe("wait");
   });
   it("orders same-SHA votes by time then numeric comment ID, not array order", () => {
     const negative = vote("hermes", "reject", { id: 10 });
@@ -163,7 +173,7 @@ describe("pure dual-review policy", () => {
     ).toBe("ready");
   });
   it("reviews only when local agent is the designated non-owner", () => {
-    const input = snapshot({ labels: ["owner:codex", "review:hermes"] });
+    const input = snapshot({ labels: ["agent:codex", "review:hermes"] });
     expect(evaluateCoordination(input, config).action).toBe("wait");
     expect(evaluateCoordination(input, { ...config, localAgent: "hermes" }).action).toBe("review");
   });
@@ -190,15 +200,15 @@ describe("pure dual-review policy", () => {
   });
   it.each([
     [],
-    ["owner:hermes"],
-    ["owner:codex", "owner:hermes"],
-    ["owner:codex", "review:unknown"],
-    ["owner:codex", "review:codex"],
-    ["owner:codex", "changes-requested:hermes"],
-    ["owner:codex", "review:hermes", "waiting:peer"],
-    ["owner:codex", "approved:codex", "approved:hermes"],
-    ["owner:codex", "approved:unknown"],
-    ["owner:codex", "blocked:coordination"],
+    ["agent:hermes"],
+    ["agent:codex", "agent:hermes"],
+    ["agent:codex", "review:unknown"],
+    ["agent:codex", "review:codex"],
+    ["agent:codex", "changes-requested:hermes"],
+    ["agent:codex", "review:hermes", "waiting:peer"],
+    ["agent:codex", "approved:codex", "approved:hermes"],
+    ["agent:codex", "approved:unknown"],
+    ["agent:codex", "blocked:coordination"],
   ])("blocks contradictory labels %j", (...labels) => {
     expect(evaluateCoordination(snapshot({ labels, comments: approvals() }), config).action).toBe(
       "blocked",
@@ -208,7 +218,7 @@ describe("pure dual-review policy", () => {
     expect(
       evaluateCoordination(
         snapshot({
-          labels: ["owner:codex", "approved:hermes"],
+          labels: ["agent:codex", "approved:hermes"],
           comments: [vote("hermes", "revise")],
         }),
         config,
@@ -217,7 +227,7 @@ describe("pure dual-review policy", () => {
   });
   it("accepts unrelated labels and configured waiting label", () => {
     expect(
-      evaluateCoordination(snapshot({ labels: ["owner:codex", "waiting:custom", "bug"] }), {
+      evaluateCoordination(snapshot({ labels: ["agent:codex", "waiting:custom", "bug"] }), {
         ...config,
         waitingLabel: "waiting:custom",
       }).action,
@@ -263,7 +273,7 @@ describe("pure dual-review policy", () => {
         evaluateCoordination(
           snapshot({
             checks,
-            labels: ["owner:codex", "changes-requested:codex"],
+            labels: ["agent:codex", "changes-requested:codex"],
             comments: [vote("hermes")],
           }),
           config,
@@ -277,13 +287,13 @@ describe("pure dual-review policy", () => {
         .replaceAll("codex", "TEMP")
         .replaceAll("hermes", "codex")
         .replaceAll("TEMP", "hermes"),
-      labels: ["owner:hermes", "changes-requested:hermes"],
+      labels: ["agent:hermes", "changes-requested:hermes"],
       comments: [vote("codex", "revise")],
     });
     expect(evaluateCoordination(input, { ...config, localAgent: "hermes" }).action).toBe("fix");
     expect(
       evaluateCoordination(
-        { ...input, labels: ["owner:hermes", "review:codex"], comments: [] },
+        { ...input, labels: ["agent:hermes", "review:codex"], comments: [] },
         config,
       ).action,
     ).toBe("review");
