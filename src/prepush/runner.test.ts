@@ -136,6 +136,32 @@ async function fixture(change = "normal") {
 }
 
 describe("isolated candidate runner", () => {
+  it.each([false, true])(
+    "revalidates correction authorization before push (manual block: %s)",
+    async (block) => {
+      const f = await fixture();
+      f.snapshot.labels = ["agent:hermes", "changes-requested:hermes"];
+      f.snapshot.comments = [
+        ...f.snapshot.comments,
+        {
+          id: 2,
+          authorId: "101",
+          updatedAt: "2026-09-09T23:00:00Z",
+          body: `<!-- agent-review:v1\nreviewer: codex\ndecision: revise\nhead-sha: ${f.expectedHead}\n-->`,
+        },
+      ];
+      const verify = f.deps.verify;
+      f.deps.verify = async (...args) => {
+        const result = await verify(...args);
+        if (block) f.snapshot.labels = [...f.snapshot.labels, "blocked:coordination"];
+        return result;
+      };
+      const result = await runPrepush(f.config, 7, f.deps);
+      expect(result.state).toBe(block ? "failed" : "pushed");
+      expect(await f.remote.head("hermes/example")).toBe(block ? f.expectedHead : f.candidateSha);
+      expect(f.counts().pushes).toBe(block ? 0 : 1);
+    },
+  );
   it("parent directory sync failure prevents transfer, verification and push", async () => {
     const f = await fixture();
     f.deps.directorySync = async (path) => {

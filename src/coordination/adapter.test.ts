@@ -607,6 +607,16 @@ function prepushFixture(enabled?: boolean) {
   return f;
 }
 describe("opt-in prepush through Desktop receipts", () => {
+  it("wakes once for a correction without clearing the old Revise label", async () => {
+    const f = prepushFixture(true);
+    f.state.labels.push("changes-requested:hermes");
+    f.state.comments.push(vote("codex", "revise"));
+    await f.adapter.deliverToThread("test-thread", "wake", opts());
+    await f.adapter.deliverToThread("test-thread", "duplicate", opts("second"));
+    expect(f.sent).toHaveLength(1);
+    expect(String(f.sent[0]?.prompt)).toContain("Action: prepush");
+    expect(f.state.labels).toContain("changes-requested:hermes");
+  });
   it("defaults off and accepts only a boolean opt-in", () => {
     expect(CoordinationConfigSchema.parse(config)).toMatchObject({ prepushEnabled: false });
     expect(CoordinationConfigSchema.safeParse({ ...config, prepushEnabled: true }).success).toBe(

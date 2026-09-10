@@ -104,6 +104,22 @@ an approval envelope. It names only the current assigned branch, expected old
 head, candidate commit and bundle digest. Unknown fields, changed ownership,
 workflow blocks, stale heads and ambiguous requests cannot authorize a push.
 
+A correction may retain `changes-requested:hermes` while its old head remains
+rejected. The sole exception requires the unchanged owner policy to validate a
+trusted current-head peer **Revise**, and a new trusted pre-push submission ordered
+after the review evidence. Manual blocks, Reject, approval/review/waiting labels,
+contradictory labels, and malformed evidence still stop verification. The selector
+does not remove labels or alter votes. Both the listener and runner use this same
+gate, including the runner's fresh check immediately before pushing.
+
+After the guarded push, the old review is stale, not converted to approval. The
+existing owner task must transition its superseded change-request label to the
+peer-review workflow; both agents must review/attest the new exact SHA. Retain any
+manual block. Failed verification leaves the old head and its rejection intact.
+This is new-candidate resubmission, not automatic retry of an already-attempted
+candidate. A repeated request with the same candidate facts retains its delivery
+receipt and journal fences; inspect the journal and remote state before recovery.
+
 Configure the candidate CLI separately in a private file. Its peer host, export
 root, local state root, digest-pinned Docker image and trusted author identity
 come from that file, never from a GitHub comment. Keep listener prepush disabled
