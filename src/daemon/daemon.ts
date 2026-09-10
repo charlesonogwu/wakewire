@@ -11,8 +11,10 @@ import { stateFilePath, wakewireHome } from "../paths.js";
 import { createSecretStore } from "../secrets/store.js";
 import { createAdapter } from "../sinks/factory.js";
 import { prepareWorktree } from "../sinks/worktree.js";
+import { GithubWebhookSource } from "../sources/github/source.js";
 import { VERSION } from "../version.js";
 import { createApi } from "./api.js";
+import { createGithubIngress, githubIngressConfig } from "./github-ingress.js";
 import { SourceManager } from "./sources.js";
 
 export interface DaemonState {
@@ -27,12 +29,14 @@ export class Daemon {
   private queue: DeliveryQueue | null = null;
   private sources: SourceManager | null = null;
   private server: Server | null = null;
+  private ingressServer: Server | null = null;
   private adapter: import("../sinks/types.js").AgentAdapter | null = null;
   private db: ReturnType<typeof openDatabase> | null = null;
 
   constructor(private readonly logger: Logger) {}
 
   async start(): Promise<DaemonState> {
+    const ingress = githubIngressConfig(process.env);
     fs.mkdirSync(wakewireHome(), { recursive: true });
     this.db = openDatabase();
     const stores = createStores(this.db);
@@ -95,6 +99,29 @@ export class Daemon {
 
     queue.start();
     await sources.startAll();
+    if (ingress) {
+      const sourceRecord = stores.sources.get(ingress.sourceId);
+      if (sourceRecord?.kind !== "github" || sourceRecord.config.mode !== "listen") {
+        await this.stop();
+        throw new Error("Dedicated ingress requires an existing listen-mode GitHub source");
+      }
+      const ingressApp = createGithubIngress(() => {
+        const source = sources.get(ingress.sourceId);
+        return source instanceof GithubWebhookSource ? source : undefined;
+      });
+      try {
+        await new Promise<void>((resolve, reject) => {
+          this.ingressServer = serve(
+            { fetch: ingressApp.fetch, hostname: "127.0.0.1", port: ingress.port },
+            () => resolve(),
+          ) as Server;
+          this.ingressServer.once("error", reject);
+        });
+      } catch (err) {
+        await this.stop();
+        throw err;
+      }
+    }
 
     this.logger.info(
       { port, adapter: adapter.name, version: VERSION },
@@ -110,6 +137,10 @@ export class Daemon {
     // Kills adapter connections AND any shared app-server child it owns —
     // otherwise the hard exit below orphans the spawned server.
     this.adapter?.close?.();
+    await new Promise<void>((resolve) => {
+      if (!this.ingressServer) return resolve();
+      this.ingressServer.close(() => resolve());
+    });
     await new Promise<void>((resolve) => {
       if (!this.server) return resolve();
       this.server.close(() => resolve());

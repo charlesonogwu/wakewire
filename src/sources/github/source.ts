@@ -34,6 +34,9 @@ export class GithubWebhookSource implements Source {
   private lastEventAt: string | null = null;
   private received = 0;
   private rejected = 0;
+  // Preserve standalone handleWebhook before start, but never revive stopped work.
+  private active = true;
+  private generation = 0;
 
   constructor(
     readonly id: string,
@@ -43,6 +46,8 @@ export class GithubWebhookSource implements Source {
   ) {}
 
   async start(): Promise<void> {
+    this.generation++;
+    this.active = true;
     if (this.config.mode !== "smee") return; // listen mode: daemon routes ingress to handleWebhook
     if (!this.config.smeeUrl) {
       throw new Error(`github source ${this.id} is in smee mode but has no smeeUrl`);
@@ -72,6 +77,9 @@ export class GithubWebhookSource implements Source {
   }
 
   async stop(): Promise<void> {
+    // Invalidate synchronously, before transport shutdown yields to pending requests.
+    this.active = false;
+    this.generation++;
     await this.smee?.stop();
     this.smee = null;
     this.connected = false;
@@ -121,6 +129,8 @@ export class GithubWebhookSource implements Source {
     signature: string | undefined;
     rawBody: string;
   }): Promise<{ status: number; message: string }> {
+    const generation = this.generation;
+    if (!this.active) return { status: 503, message: "source unavailable" };
     const { eventName, deliveryId, signature, rawBody } = args;
     if (!eventName || !deliveryId) {
       this.rejected++;
@@ -131,13 +141,22 @@ export class GithubWebhookSource implements Source {
       this.rejected++;
       return { status: 503, message: "webhook secret not configured for this source" };
     }
-    if (!(await verifyGithubSignature(secret, rawBody, signature))) {
+    const verified = await verifyGithubSignature(secret, rawBody, signature);
+    // A restart may reactivate this instance, so an active flag alone is insufficient.
+    // No further await occurs before synchronous durable emit below.
+    if (!this.active || generation !== this.generation) {
+      return { status: 503, message: "source unavailable" };
+    }
+    if (!verified) {
       this.rejected++;
       return { status: 401, message: "signature verification failed" };
     }
     let payload: Record<string, unknown>;
     try {
       payload = JSON.parse(rawBody);
+      if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+        throw new Error("expected object");
+      }
     } catch {
       this.rejected++;
       return { status: 400, message: "body is not valid JSON" };

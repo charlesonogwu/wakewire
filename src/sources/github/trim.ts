@@ -19,6 +19,23 @@ export function trimGithubEvent(args: {
   const kind = action ? `${eventName}.${action}` : eventName;
   const occurredAt = new Date().toISOString();
 
+  if (eventName === "status") {
+    const sha =
+      typeof payload.sha === "string" && /^[a-f0-9]{40}$/.test(payload.sha) ? payload.sha : null;
+    return {
+      source: "github",
+      kind: "status",
+      deliveryId,
+      occurredAt,
+      summary: `status event on ${repo}`,
+      payload: {
+        repo,
+        sha,
+        senderId: isRecord(payload.sender) ? githubId(payload.sender.id) : null,
+      },
+    };
+  }
+
   if (eventName === "push") {
     return trimPush({ repo, deliveryId, occurredAt, payload });
   }
@@ -27,6 +44,65 @@ export function trimGithubEvent(args: {
   }
   if (eventName === "issues") {
     return trimIssue({ repo, kind, action, deliveryId, occurredAt, payload });
+  }
+  if (eventName === "check_run" && action === "completed") {
+    const check = isRecord(payload.check_run) ? payload.check_run : {};
+    const prs = Array.isArray(check.pull_requests) ? check.pull_requests : [];
+    // CI completion can make a previously quiet review ready. Never infer an
+    // association from a SHA or choose arbitrarily among multiple PRs.
+    const number = prs.length === 1 && isRecord(prs[0]) ? prNumber(prs[0].number) : null;
+    return {
+      source: "github",
+      kind,
+      deliveryId,
+      occurredAt,
+      summary: `${kind} event on ${repo}`,
+      payload: {
+        repo,
+        action,
+        senderId: isRecord(payload.sender) ? githubId(payload.sender.id) : null,
+        number,
+        isPullRequest: number !== null,
+      },
+    };
+  }
+  if (
+    eventName === "issue_comment" ||
+    eventName === "pull_request_review_comment" ||
+    eventName === "pull_request_review"
+  ) {
+    const comment = isRecord(payload.comment)
+      ? payload.comment
+      : eventName === "pull_request_review" && isRecord(payload.review)
+        ? payload.review
+        : {};
+    const subject = isRecord(payload.issue)
+      ? payload.issue
+      : isRecord(payload.pull_request)
+        ? payload.pull_request
+        : {};
+    return {
+      source: "github",
+      kind,
+      deliveryId,
+      occurredAt,
+      summary: `${kind} event on ${repo}`,
+      payload: {
+        repo,
+        ...(action ? { action } : {}),
+        senderId: isRecord(payload.sender) ? githubId(payload.sender.id) : null,
+        commentAuthorId: isRecord(comment.user) ? githubId(comment.user.id) : null,
+        commentId: githubId(comment.id),
+        commentBody: truncate(typeof comment.body === "string" ? comment.body : "", 4000),
+        number:
+          typeof subject.number === "number" &&
+          Number.isSafeInteger(subject.number) &&
+          subject.number > 0
+            ? subject.number
+            : null,
+        isPullRequest: isRecord(payload.pull_request) || isRecord(subject.pull_request),
+      },
+    };
   }
   // Generic fallback: minimal, still routable by repo + event name.
   return {
@@ -100,8 +176,7 @@ function trimPullRequest(args: {
 }): WakeEvent {
   const { repo, kind, action, deliveryId, occurredAt, payload } = args;
   const pr = isRecord(payload.pull_request) ? payload.pull_request : {};
-  const number =
-    typeof payload.number === "number" ? payload.number : (pr.number as number | undefined);
+  const number = prNumber(payload.number ?? pr.number);
   const title = typeof pr.title === "string" ? truncate(pr.title, 200) : "";
   const author = isRecord(pr.user) && typeof pr.user.login === "string" ? pr.user.login : "unknown";
   const url = typeof pr.html_url === "string" ? pr.html_url : "";
@@ -117,6 +192,8 @@ function trimPullRequest(args: {
       repo,
       ...(action ? { action } : {}),
       number: number ?? null,
+      senderId: isRecord(payload.sender) ? githubId(payload.sender.id) : null,
+      isPullRequest: true,
       title,
       author,
       url,
@@ -166,6 +243,16 @@ function repoFullName(payload: Record<string, unknown>): string | null {
     return repository.full_name;
   }
   return null;
+}
+
+function githubId(value: unknown): string | null {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return String(value);
+  if (typeof value === "string" && /^[1-9]\d*$/.test(value)) return value;
+  return null;
+}
+
+function prNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

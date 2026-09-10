@@ -173,6 +173,7 @@ export class DeliveryQueue {
    * turn carried by the newest delivery.
    */
   private maybeCoalesce(route: Route, delivery: Delivery, ready: Delivery[]): Delivery {
+    if (this.adapter.supportsCoalescing === false) return delivery;
     const limit = route.rateLimitPerMinute ?? this.ratePerMinute;
     const windowStart = new Date(this.now().getTime() - 60_000).toISOString();
     const recent = this.stores.deliveries.countRecentAttempts(route.id, windowStart);
@@ -227,10 +228,12 @@ export class DeliveryQueue {
   }
 
   private async deliver(route: Route, delivery: Delivery, prompt: string) {
-    const opts = { sandbox: route.sandbox };
+    const opts = { sandbox: route.sandbox, deliveryId: delivery.id, event: delivery.event };
     if (route.target.type === "thread") {
       return this.adapter.deliverToThread(route.target.threadId, prompt, opts);
     }
+    if (this.adapter.supportsNewThreads === false)
+      throw new PermanentError("This adapter only supports existing threads");
     let cwd = route.target.cwd;
     if (route.target.worktree) {
       if (!this.options.prepareWorktree) {

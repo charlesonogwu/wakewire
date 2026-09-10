@@ -1,6 +1,11 @@
+import type { WakeEvent } from "../core/event.js";
 import type { SandboxPolicy } from "../core/route.js";
 
 export interface DeliveryOptions {
+  /** Original persisted event, required by fresh-snapshot coordination gates. */
+  event?: WakeEvent | undefined;
+  /** Durable queue identity, required by owner-routed Desktop delivery. */
+  deliveryId?: string | undefined;
   sandbox: SandboxPolicy;
   /** Working directory override (used for new threads; ignored for resume by some adapters). */
   cwd?: string | undefined;
@@ -19,6 +24,8 @@ export interface DeliveryResult {
  */
 export interface AgentAdapter {
   readonly name: string;
+  readonly supportsCoalescing?: boolean;
+  readonly supportsNewThreads?: boolean;
   /** Append a turn to an existing thread. */
   deliverToThread(threadId: string, prompt: string, opts: DeliveryOptions): Promise<DeliveryResult>;
   /** Start a new thread in opts.cwd and send the prompt as its first turn. */

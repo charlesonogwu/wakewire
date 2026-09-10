@@ -2,7 +2,12 @@ import crypto from "node:crypto";
 import { z } from "zod";
 import type { SettingsStore } from "./db/repos.js";
 
-export const AdapterNameSchema = z.enum(["codex-sdk", "codex-app-server", "codex-exec"]);
+export const AdapterNameSchema = z.enum([
+  "codex-sdk",
+  "codex-app-server",
+  "codex-exec",
+  "codex-desktop",
+]);
 export type AdapterName = z.infer<typeof AdapterNameSchema>;
 
 export interface DaemonConfig {

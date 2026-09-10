@@ -11,6 +11,22 @@ export const GithubMatchSchema = z.object({
   events: z.array(z.string().min(1)).min(1).default(["push"]),
   /** For push events: only these branches. Omit for all branches. */
   branches: z.array(z.string().min(1)).optional(),
+  /** Immutable GitHub IDs, checked independently from mutable login names. */
+  senderIds: z
+    .array(z.string().regex(/^[1-9]\d*$/))
+    .min(1)
+    .optional(),
+  commentAuthorIds: z
+    .array(z.string().regex(/^[1-9]\d*$/))
+    .min(1)
+    .optional(),
+  /** Exact standalone line in a comment; not an authorization credential. */
+  commentMarker: z
+    .string()
+    .min(1)
+    .max(200)
+    .regex(/^[^\r\n]+$/)
+    .optional(),
 });
 
 export const SlackMatchSchema = z
