@@ -21,7 +21,9 @@ received by the same live Desktop conversation. The experimental adapter now use
 that owner-routed connector, not hooks or a private app-server. It verifies one
 registered local task/workspace and uses a durable sending fence. Queue coalescing
 is disabled for this adapter to preserve receipt identities. Live GitHub ingress
-and unattended branch actions remain disabled. An idle-wake probe is still required.
+and unattended branch actions remain disabled. The idle-wake probe subsequently
+passed through the existing Desktop owner with one durable sent receipt; do not
+repeat the completed probe. Follow the dual-review plan for remaining activation.
 
 - [ ] Investigate supported Codex lifecycle hooks or shared-server coordination and document limitations with Windows runtime evidence.
 - [ ] Implement a narrowly scoped guard only if every participating turn can share the same authority. Missing registration, corrupt state, duplicate ownership or uncertain liveness must hold delivery rather than spawn competing work.

@@ -58,3 +58,45 @@ connector path and, optionally, `--send-once`. Without that flag it only probes
 reachability. With it, one fixed synthetic message is sent after the calling
 conversation becomes idle, at most once per thread, with a ten-minute deadline.
 It does not install a daemon, register webhooks, or enable business handoffs.
+
+## Dual-review delivery gate
+
+The opt-in coordination gate reads current GitHub evidence before delivering work.
+Both logical agents must explicitly approve the same current commit, with passing
+checks, before readiness is reported. An old approval, a label by itself, or a
+self-declared marker from an untrusted account cannot establish readiness.
+Branch owners make corrections; the other agent reviews. Missing owner evidence
+requires verification rather than an inferred approval. Merge and deployment
+remain separately authorized actions, never webhook commands.
+
+Subscribe coordination routes to PR and comment changes, completed check runs,
+and commit `status` events. Some CI providers finish through commit statuses
+rather than check runs. Status events resolve current, same-repository open PRs
+through the commit association API, then fetch each PR's fresh evidence. Stale
+commits and fork associations do not authorize a wake. Multiple current matches
+are processed individually rather than selecting an arbitrary first match.
+
+This gate does not install an implementer on a peer machine. The peer's existing
+reviewer and owner-task dispatcher must be configured separately. In particular,
+a peer prohibited from building locally needs an off-machine pre-push verification
+handoff; do not bypass its build-before-push rule to make the queue advance.
+
+Using the same GitHub account for both agents identifies logical roles, not two
+independently authenticated people. Separate trusted account IDs give stronger
+identity separation. The event receiver cannot enforce the Desktop task's tool
+permissions: those remain inherited as described above.
+
+## Dedicated signed ingress
+
+To expose only GitHub webhooks through a tunnel, configure a listen-mode GitHub
+source and set both `WAKEWIRE_GITHUB_SOURCE_ID` and
+`WAKEWIRE_GITHUB_INGRESS_PORT` before daemon startup. The dedicated listener binds
+`127.0.0.1` and accepts only `POST /github`, with a 1 MiB body limit and the source's
+GitHub HMAC secret. Point the tunnel at this dedicated port, **not the management
+API port**. Unknown paths are not forwarded to management. No tunnel or GitHub
+hook is installed merely by these code changes.
+
+Received events are durably queued. Events GitHub could not deliver while the
+receiver was offline require explicit reconciliation; do not assume automatic
+GitHub redelivery. Likewise, an uncertain Desktop acceptance requires inspection,
+not deleting its receipt and retrying blindly.
