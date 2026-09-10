@@ -87,6 +87,17 @@ function str(value: unknown): string {
 }
 
 function matchGithub(match: GithubMatch, event: WakeEvent): boolean {
+  if (match.senderIds && !match.senderIds.includes(str(event.payload.senderId))) return false;
+  if (
+    match.commentAuthorIds &&
+    !match.commentAuthorIds.includes(str(event.payload.commentAuthorId))
+  )
+    return false;
+  if (
+    match.commentMarker &&
+    !str(event.payload.commentBody).split(/\r?\n/).includes(match.commentMarker)
+  )
+    return false;
   const repo = event.payload.repo;
   if (typeof repo !== "string" || repo.toLowerCase() !== match.repo.toLowerCase()) return false;
 

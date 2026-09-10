@@ -28,6 +28,44 @@ export function trimGithubEvent(args: {
   if (eventName === "issues") {
     return trimIssue({ repo, kind, action, deliveryId, occurredAt, payload });
   }
+  if (
+    eventName === "issue_comment" ||
+    eventName === "pull_request_review_comment" ||
+    eventName === "pull_request_review"
+  ) {
+    const comment = isRecord(payload.comment)
+      ? payload.comment
+      : eventName === "pull_request_review" && isRecord(payload.review)
+        ? payload.review
+        : {};
+    const subject = isRecord(payload.issue)
+      ? payload.issue
+      : isRecord(payload.pull_request)
+        ? payload.pull_request
+        : {};
+    return {
+      source: "github",
+      kind,
+      deliveryId,
+      occurredAt,
+      summary: `${kind} event on ${repo}`,
+      payload: {
+        repo,
+        ...(action ? { action } : {}),
+        senderId: isRecord(payload.sender) ? githubId(payload.sender.id) : null,
+        commentAuthorId: isRecord(comment.user) ? githubId(comment.user.id) : null,
+        commentId: githubId(comment.id),
+        commentBody: truncate(typeof comment.body === "string" ? comment.body : "", 4000),
+        number:
+          typeof subject.number === "number" &&
+          Number.isSafeInteger(subject.number) &&
+          subject.number > 0
+            ? subject.number
+            : null,
+        isPullRequest: isRecord(payload.pull_request) || isRecord(subject.pull_request),
+      },
+    };
+  }
   // Generic fallback: minimal, still routable by repo + event name.
   return {
     source: "github",
@@ -165,6 +203,12 @@ function repoFullName(payload: Record<string, unknown>): string | null {
   if (isRecord(repository) && typeof repository.full_name === "string") {
     return repository.full_name;
   }
+  return null;
+}
+
+function githubId(value: unknown): string | null {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return String(value);
+  if (typeof value === "string" && /^[1-9]\d*$/.test(value)) return value;
   return null;
 }
 
