@@ -19,7 +19,7 @@ function fixture() {
     },
     { emit: (event) => events.push(event), logger: pino({ level: "silent" }) },
   );
-  return { app: createGithubIngress(() => source), events };
+  return { app: createGithubIngress(() => source), source, events };
 }
 function request(body: string, signature?: string) {
   return {
@@ -43,6 +43,55 @@ const payload = JSON.stringify({
 });
 
 describe("public GitHub-only ingress", () => {
+  it.each(["stop", "remove", "replace"] as const)(
+    "resolves the active source after an interrupted body read: %s",
+    async (operation) => {
+      const original = fixture();
+      const replacement = fixture();
+      let current: GithubWebhookSource | undefined = original.source;
+      const app = createGithubIngress(() => current);
+      let reading = () => {};
+      const bodyStarted = new Promise<void>((resolve) => {
+        reading = resolve;
+      });
+      let release = () => {};
+      const bodyReleased = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const body = new ReadableStream<Uint8Array>(
+        {
+          async pull(controller) {
+            reading();
+            await bodyReleased;
+            controller.enqueue(new TextEncoder().encode(payload));
+            controller.close();
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      const init: RequestInit & { duplex: "half" } = {
+        ...request(payload),
+        body,
+        duplex: "half",
+        headers: {
+          ...request(payload).headers,
+          "content-length": String(Buffer.byteLength(payload)),
+        },
+      };
+      const pending = app.fetch(new Request("http://localhost/github", init));
+      await bodyStarted;
+      await original.source.stop();
+      if (operation === "remove") current = undefined;
+      if (operation === "replace") {
+        await replacement.source.start();
+        current = replacement.source;
+      }
+      release();
+      expect((await pending).status).toBe(operation === "replace" ? 200 : 503);
+      expect(original.events).toHaveLength(0);
+      expect(replacement.events).toHaveLength(operation === "replace" ? 1 : 0);
+    },
+  );
   it("fails closed when its configured source is stopped", async () => {
     const app = createGithubIngress(() => undefined);
     expect((await app.request("/github", request(payload))).status).toBe(503);

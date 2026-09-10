@@ -25,13 +25,15 @@ export function createGithubIngress(getSource: () => GithubWebhookSource | undef
   const app = new Hono();
   app.use("/github", bodyLimit({ maxSize: 1_048_576 }));
   app.post("/github", async (c) => {
+    // Body consumption can outlive source removal or replacement.
+    const rawBody = await c.req.text();
     const source = getSource();
     if (!source) return c.json({ message: "source unavailable" }, 503);
     const result = await source.handleWebhook({
       eventName: c.req.header("x-github-event"),
       deliveryId: c.req.header("x-github-delivery"),
       signature: c.req.header("x-hub-signature-256"),
-      rawBody: await c.req.text(),
+      rawBody,
     });
     return c.json({ message: result.message }, result.status as 200);
   });
