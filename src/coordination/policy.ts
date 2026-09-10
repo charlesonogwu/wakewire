@@ -9,6 +9,7 @@ export interface CoordinationSnapshot {
   repository: string;
   state: "open" | "closed";
   headSha: string | null;
+  headBranch?: string;
   headRepository: string;
   body: string;
   labels: readonly string[];
@@ -20,6 +21,7 @@ export interface CoordinationConfig {
   localAgent: Agent;
   trustedAuthorIds: Readonly<Record<Agent, readonly string[]>>;
   waitingLabel: string;
+  prepushEnabled?: boolean;
 }
 export interface CoordinationResult {
   action: "ignore" | "wait" | "fix" | "review" | "verify" | "ready" | "blocked";

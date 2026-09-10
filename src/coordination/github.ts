@@ -17,7 +17,7 @@ const Pull = z.object({
   state: z.enum(["open", "closed"]),
   body: z.string().nullable(),
   labels: z.array(z.object({ name: z.string() })),
-  head: z.object({ sha: Sha, repo: Repository.nullable() }),
+  head: z.object({ sha: Sha, ref: z.string().optional(), repo: Repository.nullable() }),
   base: z.object({ repo: Repository }),
 });
 const Comment = z.object({
@@ -59,6 +59,7 @@ function pullIdentity(pr: z.infer<typeof Pull>) {
     pr.state,
     pr.body,
     pr.head.sha,
+    pr.head.ref,
     pr.head.repo?.full_name,
     pr.base.repo.full_name,
     pr.labels.map((label) => label.name).sort(),
@@ -222,6 +223,7 @@ export class GithubSnapshotClient {
       repository: this.repository,
       state: pr.state,
       headSha: sha,
+      ...(pr.head.ref === undefined ? {} : { headBranch: pr.head.ref }),
       headRepository: pr.head.repo?.full_name ?? "",
       body: pr.body ?? "",
       labels: pr.labels.map((label) => label.name),
