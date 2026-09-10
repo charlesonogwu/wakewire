@@ -138,6 +138,9 @@ export class GithubWebhookSource implements Source {
     let payload: Record<string, unknown>;
     try {
       payload = JSON.parse(rawBody);
+      if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+        throw new Error("expected object");
+      }
     } catch {
       this.rejected++;
       return { status: 400, message: "body is not valid JSON" };
