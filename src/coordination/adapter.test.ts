@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../config.js";
 import type { WakeEvent } from "../core/event.js";
 import { DeliveryQueue } from "../core/queue.js";
+import { matchRoutes } from "../core/router.js";
 import { openDatabase } from "../db/db.js";
 import { createStores } from "../db/repos.js";
 import { CodexDesktopAdapter, type DesktopToolClient } from "../sinks/codex-desktop.js";
@@ -79,6 +80,8 @@ function fixture() {
     status: "open",
     desktop: "idle",
     failSend: false,
+    associations: [7],
+    previewCheck: false,
   };
   const reads: string[] = [];
   const sent: Record<string, unknown>[] = [];
@@ -113,26 +116,38 @@ function fixture() {
     const prefix = "repos/example/project/";
     if (!url.startsWith(prefix)) throw new Error("Foreign repository");
     const endpoint = url.slice(prefix.length);
-    if (endpoint === "pulls/7")
+    if (endpoint === `commits/${state.head}/pulls?per_page=100&page=1`)
+      return Promise.all(state.associations.map((number) => transport(`${prefix}pulls/${number}`)));
+    const number = Number(/^pulls\/(\d+)$/.exec(endpoint)?.[1]);
+    if (state.associations.includes(number))
       return {
-        number: 7,
+        number,
         state: state.status,
         body: state.body,
         labels: state.labels.map((name) => ({ name })),
         head: { sha: state.head, repo: { full_name: "example/project" } },
         base: { repo: { full_name: "example/project" } },
       };
-    if (endpoint === "issues/7/comments?per_page=100&page=1")
+    if (
+      state.associations.some(
+        (number) => endpoint === `issues/${number}/comments?per_page=100&page=1`,
+      )
+    )
       return structuredClone(state.comments);
     if (endpoint === `commits/${state.head}/status`)
       return {
         sha: state.head,
         state: state.checks,
-        total_count: state.checks === "pending" ? 0 : 1,
-        statuses: state.checks === "pending" ? [] : [{ state: state.checks, context: "Vercel" }],
+        total_count: 1,
+        statuses: [{ state: state.checks, context: "Vercel" }],
       };
     if (endpoint === `commits/${state.head}/check-runs?per_page=100&page=1`)
-      return { total_count: 0, check_runs: [] };
+      return {
+        total_count: state.previewCheck ? 1 : 0,
+        check_runs: state.previewCheck
+          ? [{ id: 303, head_sha: state.head, status: "completed", conclusion: "success" }]
+          : [],
+      };
     throw new Error(`Unexpected GitHub GET ${url}`);
   };
   const snapshots = new GithubSnapshotClient(config.expectedRepository, transport);
@@ -156,6 +171,113 @@ function fixture() {
   };
 }
 describe("fresh coordination through actual Desktop receipts", () => {
+  it("wakes on status-only CI success after preview checks already finished, through real routing and queue", async () => {
+    const f = fixture();
+    f.state.previewCheck = true;
+    f.state.checks = "pending";
+    const q = statusQueue(f);
+    q.enqueue("pending");
+    await q.queue.tick();
+    expect(f.sent).toEqual([]);
+    expect(q.stores.deliveries.list({ status: "delivered" })).toHaveLength(1);
+    f.state.checks = "success";
+    q.enqueue("success");
+    await q.queue.tick();
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]?.prompt).toContain("Action: ready");
+    await f.adapter.deliverToThread(
+      "test-thread",
+      "same decision from a PR event",
+      opts("pr-duplicate"),
+    );
+    expect(f.sent).toHaveLength(1);
+    q.enqueue("duplicate");
+    await q.queue.tick();
+    expect(f.sent).toHaveLength(1);
+    expect(q.stores.deliveries.list({ status: "delivered" })).toHaveLength(3);
+  });
+  it("processes every matching PR deterministically and resumes after busy without resending the first", async () => {
+    const f = fixture();
+    f.state.associations = [12, 7];
+    const original = f.client.call.bind(f.client);
+    f.client.call = async (name, args) => {
+      const result = await original(name, args);
+      if (name === "send_message_to_thread") f.state.desktop = "active";
+      return result;
+    };
+    const q = statusQueue(f);
+    q.enqueue("multi");
+    await q.queue.tick();
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]?.prompt).toContain('"number":7');
+    expect(q.stores.deliveries.list({ status: "held" })).toHaveLength(1);
+    f.state.desktop = "idle";
+    f.client.call = original;
+    q.advance();
+    await q.queue.tick();
+    expect(f.sent).toHaveLength(2);
+    expect(f.sent[1]?.prompt).toContain('"number":12');
+    expect(q.stores.deliveries.list({ status: "delivered" })).toHaveLength(1);
+    f.state.associations.reverse();
+    q.enqueue("multi-duplicate");
+    await q.queue.tick();
+    expect(f.sent).toHaveLength(2);
+  });
+  it.each([undefined, null, "", "A".repeat(40), "a".repeat(41), "../bad"])(
+    "rejects missing/malformed status SHA before resolving or sending %j",
+    async (sha) => {
+      const f = fixture();
+      await expect(
+        f.adapter.deliverToThread("test-thread", "untrusted", {
+          ...opts(),
+          event: {
+            ...event(),
+            kind: "status",
+            payload: { repo: config.expectedRepository, sha, number: 7 },
+          },
+        }),
+      ).rejects.toThrow();
+      expect(f.reads).toEqual([]);
+      expect(f.sent).toEqual([]);
+    },
+  );
+  it("quietly consumes status with no matching association", async () => {
+    const f = fixture();
+    f.state.associations = [];
+    const q = statusQueue(f);
+    q.enqueue("none");
+    await q.queue.tick();
+    expect(f.sent).toEqual([]);
+    expect(q.stores.deliveries.list({ status: "delivered" })).toHaveLength(1);
+  });
+  it.each(["stale", "fork", "closed"])(
+    "does not wake if a resolved PR becomes %s before its fresh snapshot",
+    async (change) => {
+      const f = fixture();
+      const snapshots = new GithubSnapshotClient(config.expectedRepository, async (url) => {
+        const raw = await f.transport(url);
+        // Association and explicit lookup still show an eligible PR. Change only
+        // the subsequent full snapshot's PR responses.
+        if (url.endsWith("pulls/7") && f.reads.filter((p) => p.endsWith("pulls/7")).length > 2) {
+          const pr = raw as { head: { sha: string; repo: { full_name: string } } };
+          if (change === "fork")
+            return { ...pr, head: { ...pr.head, repo: { full_name: "fork/project" } } };
+          if (change === "closed") return { ...pr, state: "closed" };
+          f.state.head = "b".repeat(40);
+          return { ...pr, head: { ...pr.head, sha: f.state.head } };
+        }
+        return raw;
+      });
+      const inner = new CodexDesktopAdapter(f.desktopConfig, f.client);
+      cleanup.push(() => inner.close());
+      const adapter = new CoordinationAdapter(config, snapshots, inner);
+      await adapter.deliverToThread("test-thread", "untrusted", {
+        ...opts(),
+        event: statusEvent("race"),
+      });
+      expect(f.sent).toEqual([]);
+    },
+  );
   it("wakes readiness on associated check completion after quietly consuming a pending review event", async () => {
     const f = fixture();
     f.state.checks = "pending";
@@ -416,6 +538,53 @@ describe("fresh coordination through actual Desktop receipts", () => {
     expect(f.sent).toHaveLength(1);
   });
 });
+
+function statusEvent(deliveryId: string): WakeEvent {
+  const result = trimGithubEvent({
+    eventName: "status",
+    deliveryId,
+    payload: {
+      repository: { full_name: config.expectedRepository },
+      sender: { id: 303 },
+      sha,
+      state: "success",
+      description: "untrusted webhook evidence",
+    },
+  });
+  if (!result) throw new Error("Missing status event");
+  return result;
+}
+function statusQueue(f: ReturnType<typeof fixture>) {
+  const db = openDatabase(":memory:");
+  cleanup.push(() => db.close());
+  const stores = createStores(db);
+  const route = stores.routes.create({
+    name: "status-ci",
+    source: "github",
+    match: { repo: config.expectedRepository, events: ["status"], senderIds: ["303"] },
+    target: { type: "thread", threadId: "test-thread" },
+    sandbox: "workspace-write",
+    enabled: true,
+  });
+  let now = new Date("2026-09-10T11:00:00Z");
+  const queue = new DeliveryQueue(stores, f.adapter, pino({ level: "silent" }), {
+    autoWake: false,
+    now: () => now,
+  });
+  return {
+    queue,
+    stores,
+    advance: () => {
+      now = new Date(now.getTime() + 2000);
+    },
+    enqueue: (id: string) => {
+      const input = statusEvent(id);
+      const routes = matchRoutes([route], input);
+      expect(routes).toHaveLength(1);
+      for (const matched of routes) queue.enqueueEvent(matched, input);
+    },
+  };
+}
 
 describe("private registration opt-in", () => {
   it.each([false, true])("wraps only explicit coordination registration: %s", (enabled) => {

@@ -47,6 +47,85 @@ const check = (id: number, conclusion = "success", status = "completed") => ({
 });
 
 describe("fresh GitHub snapshot", () => {
+  it("resolves every exact open commit association in numeric order after current-PR validation", async () => {
+    const f = fixture();
+    f.data[`commits/${sha}/pulls?per_page=100&page=1`] = [
+      { ...f.pr, number: 12 },
+      f.pr,
+      { ...f.pr, number: 9, state: "closed" },
+      { ...f.pr, number: 10, head: { ...f.pr.head, sha: "b".repeat(40) } },
+      { ...f.pr, number: 11, head: { ...f.pr.head, repo: { full_name: "fork/project" } } },
+      { ...f.pr, number: 13, base: { repo: { full_name: "foreign/project" } } },
+    ];
+    f.data["pulls/12"] = { ...f.pr, number: 12 };
+    expect(await f.client.findPullRequestsForCommit(sha)).toEqual([7, 12]);
+    expect(f.paths.slice(1)).toEqual([
+      "repos/example/project/pulls/7",
+      "repos/example/project/pulls/12",
+    ]);
+  });
+  it.each(["closed", "stale", "fork", "base"])(
+    "ignores an association that is now %s",
+    async (change) => {
+      const f = fixture();
+      f.data[`commits/${sha}/pulls?per_page=100&page=1`] = [structuredClone(f.pr)];
+      f.data["pulls/7"] = {
+        ...f.pr,
+        ...(change === "closed" ? { state: "closed" } : {}),
+        ...(change === "stale" ? { head: { ...f.pr.head, sha: "b".repeat(40) } } : {}),
+        ...(change === "fork"
+          ? { head: { ...f.pr.head, repo: { full_name: "fork/project" } } }
+          : {}),
+        ...(change === "base" ? { base: { repo: { full_name: "foreign/project" } } } : {}),
+      };
+      expect(await f.client.findPullRequestsForCommit(sha)).toEqual([]);
+    },
+  );
+  it("reads all commit association pages before returning any matches", async () => {
+    const f = fixture();
+    f.data[`commits/${sha}/pulls?per_page=100&page=1`] = Array.from({ length: 100 }, (_, i) => ({
+      ...f.pr,
+      number: i + 20,
+      state: "closed",
+    }));
+    f.data[`commits/${sha}/pulls?per_page=100&page=2`] = [f.pr];
+    expect(await f.client.findPullRequestsForCommit(sha)).toEqual([7]);
+    expect(f.paths).toContain(`repos/example/project/commits/${sha}/pulls?per_page=100&page=2`);
+  });
+  it.each(["", "ABC", "A".repeat(40), "a".repeat(41), "../x", `${"a".repeat(40)}\n`])(
+    "rejects malformed commit SHA before transport: %s",
+    async (value) => {
+      const f = fixture();
+      await expect(f.client.findPullRequestsForCommit(value)).rejects.toThrow();
+      expect(f.paths).toEqual([]);
+    },
+  );
+  it.each([{ number: 7 }, { number: 0 }, { state: "unknown" }, { head: { sha } }])(
+    "fails closed on malformed association shapes: %j",
+    async (invalid) => {
+      const f = fixture();
+      f.data[`commits/${sha}/pulls?per_page=100&page=1`] = [invalid];
+      await expect(f.client.findPullRequestsForCommit(sha)).rejects.toThrow();
+    },
+  );
+  it("rejects duplicate PR association identities", async () => {
+    const f = fixture();
+    f.data[`commits/${sha}/pulls?per_page=100&page=1`] = [f.pr, f.pr];
+    await expect(f.client.findPullRequestsForCommit(sha)).rejects.toThrow(/duplicate/i);
+  });
+  it("caps endless commit association pagination without partial results", async () => {
+    const f = fixture();
+    let pages = 0;
+    const client = new GithubSnapshotClient("example/project", async () => {
+      pages++;
+      return Array.from({ length: 100 }, (_, i) => ({
+        ...f.pr,
+        number: (pages - 1) * 100 + i + 1,
+      }));
+    });
+    await expect(client.findPullRequestsForCommit(sha)).rejects.toThrow(/page.*limit/i);
+    expect(pages).toBe(100);
+  });
   it("never treats zero evidence as success and re-reads the PR last", async () => {
     const f = fixture();
     expect(await f.client.read(7)).toMatchObject({

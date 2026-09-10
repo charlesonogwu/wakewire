@@ -76,6 +76,38 @@ export class GithubSnapshotClient {
   private get(endpoint: string) {
     return this.transport(`repos/${this.repository}/${endpoint}`);
   }
+  async findPullRequestsForCommit(sha: string): Promise<number[]> {
+    Sha.parse(sha);
+    const candidates: number[] = [];
+    const seen = new Set<number>();
+    const matches = (pr: z.infer<typeof Pull>) =>
+      pr.state === "open" &&
+      pr.head.sha === sha &&
+      pr.head.repo?.full_name === this.repository &&
+      pr.base.repo.full_name === this.repository;
+    // Finish pagination before yielding any work: errors cannot silently
+    // produce a partial first-PR-only result. Association data is not authority.
+    for (let page = 1; ; page++) {
+      if (page > 100) throw new Error("GitHub commit association page limit exceeded");
+      const batch = z
+        .array(Pull)
+        .max(100)
+        .parse(await this.get(`commits/${sha}/pulls?per_page=100&page=${page}`));
+      for (const pr of batch) {
+        if (seen.has(pr.number)) throw new Error("Duplicate commit PR association");
+        seen.add(pr.number);
+        if (matches(pr)) candidates.push(pr.number);
+      }
+      if (batch.length < 100) break;
+    }
+    const result: number[] = [];
+    for (const number of candidates.sort((a, b) => a - b)) {
+      const current = Pull.parse(await this.get(`pulls/${number}`));
+      if (current.number !== number) throw new Error("GitHub PR identity mismatch");
+      if (matches(current)) result.push(number);
+    }
+    return result;
+  }
   async read(number: number): Promise<CoordinationSnapshot> {
     PositiveId.parse(number);
     const pr = Pull.parse(await this.get(`pulls/${number}`));

@@ -170,8 +170,29 @@ describe("trimGithubEvent — pull_request / issues / fallback", () => {
         sha: "a".repeat(40),
       },
     });
-    expect(result?.payload).toEqual({ repo: "example/project" });
+    expect(result?.payload).toEqual({
+      repo: "example/project",
+      sha: "a".repeat(40),
+      senderId: null,
+    });
   });
+  it.each([undefined, "", "A".repeat(40), "a".repeat(41), "../bad", 123])(
+    "bounds and rejects invalid status SHA %j",
+    (sha) => {
+      const result = trimGithubEvent({
+        eventName: "status",
+        deliveryId: "status",
+        payload: {
+          repository: { full_name: "example/project" },
+          sha,
+          sender: { id: 303 },
+          description: "not retained",
+        },
+      });
+      expect(result?.kind).toBe("status");
+      expect(result?.payload).toEqual({ repo: "example/project", sha: null, senderId: "303" });
+    },
+  );
   it("trims pull_request events with the action in the kind", () => {
     const event = trimGithubEvent({
       eventName: "pull_request",

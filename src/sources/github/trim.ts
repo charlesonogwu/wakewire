@@ -19,6 +19,23 @@ export function trimGithubEvent(args: {
   const kind = action ? `${eventName}.${action}` : eventName;
   const occurredAt = new Date().toISOString();
 
+  if (eventName === "status") {
+    const sha =
+      typeof payload.sha === "string" && /^[a-f0-9]{40}$/.test(payload.sha) ? payload.sha : null;
+    return {
+      source: "github",
+      kind: "status",
+      deliveryId,
+      occurredAt,
+      summary: `status event on ${repo}`,
+      payload: {
+        repo,
+        sha,
+        senderId: isRecord(payload.sender) ? githubId(payload.sender.id) : null,
+      },
+    };
+  }
+
   if (eventName === "push") {
     return trimPush({ repo, deliveryId, occurredAt, payload });
   }

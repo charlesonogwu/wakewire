@@ -127,9 +127,23 @@ export class CoordinationAdapter implements AgentAdapter {
   }
   async deliverToThread(threadId: string, _prompt: string, opts: DeliveryOptions) {
     const event = opts.event;
+    if (event?.source !== "github" || event.payload.repo !== this.config.expectedRepository)
+      throw new PermanentError(
+        "Coordination requires a GitHub event for the configured repository",
+      );
+    if (event.kind === "status") {
+      const sha = event.payload.sha;
+      if (typeof sha !== "string" || !/^[a-f0-9]{40}$/.test(sha))
+        throw new PermanentError("Coordination status requires a lowercase 40-hex commit SHA");
+      const numbers = await this.snapshots.findPullRequestsForCommit(sha);
+      for (const number of numbers) {
+        // Sequential work preserves Desktop's idle gate. A busy retry resolves
+        // again, visits prior receipts safely, then continues remaining PRs.
+        await this.deliverPullRequest(threadId, number, opts, sha);
+      }
+      return { threadId };
+    }
     if (
-      event?.source !== "github" ||
-      event.payload.repo !== this.config.expectedRepository ||
       typeof event.payload.number !== "number" ||
       !Number.isSafeInteger(event.payload.number) ||
       event.payload.number <= 0
@@ -137,15 +151,33 @@ export class CoordinationAdapter implements AgentAdapter {
       throw new PermanentError(
         "Coordination requires a GitHub event for the configured repository and a positive PR number",
       );
+    return this.deliverPullRequest(threadId, event.payload.number, opts);
+  }
+  private async deliverPullRequest(
+    threadId: string,
+    number: number,
+    opts: DeliveryOptions,
+    eventSha?: string,
+  ) {
     // No cache: a busy Desktop attempt and every queue retry collect again.
     // read() ends by revalidating the PR immediately before this decision/send.
-    const snapshot = await this.snapshots.read(event.payload.number);
+    const snapshot = await this.snapshots.read(number);
+    // Commit association lookup and delivery are not atomic. A status for an
+    // old/fork/closed head must not wake even a blocked action on a different PR state.
+    if (
+      eventSha !== undefined &&
+      (snapshot.headSha !== eventSha ||
+        snapshot.state !== "open" ||
+        snapshot.repository !== this.config.expectedRepository ||
+        snapshot.headRepository !== this.config.expectedRepository)
+    )
+      return { threadId };
     const decision = evaluateCoordination(snapshot, this.config);
     if (decision.action === "wait" || decision.action === "ignore") return { threadId };
     const evidence = latestEvidence(snapshot, this.config);
     const context = {
       repository: this.config.expectedRepository,
-      number: event.payload.number,
+      number,
       headSha: decision.headSha,
       owner: decision.owner,
       action: decision.action,
