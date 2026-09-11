@@ -43,6 +43,28 @@ function vote(
 }
 const approvals = () => [vote("codex"), vote("hermes")];
 describe("pure dual-review policy", () => {
+  it.each([
+    "Our docs specify agent-review:v1 verdicts. This is only a summary.",
+    "The `agent-review:v1` protocol is documented elsewhere.",
+    "agent-review:v1 verdicts are already posted; this is only a summary.",
+  ])("ignores prose mention without hiding real decisions: %s", (body) => {
+    const summary = vote("hermes", "approve", { id: 3, body });
+    expect(
+      evaluateCoordination(snapshot({ comments: [...approvals(), summary] }), config).action,
+    ).toBe("ready");
+    expect(evaluateCoordination(snapshot({ comments: [summary] }), config).action).toBe("wait");
+    expect(
+      evaluateCoordination(snapshot({ comments: [vote("hermes", "reject"), summary] }), config)
+        .action,
+    ).toBe("blocked");
+  });
+  it("allows prose alongside one actual review declaration", () => {
+    const peer = vote("hermes");
+    peer.body += "\nagent-review:v1 is the protocol used above.";
+    expect(evaluateCoordination(snapshot({ comments: [vote("codex"), peer] }), config).action).toBe(
+      "ready",
+    );
+  });
   it("accepts agent:hermes ownership with both current approvals", () => {
     expect(
       evaluateCoordination(

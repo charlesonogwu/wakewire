@@ -3,6 +3,7 @@ import {
   type CoordinationSnapshot,
   evaluateCoordination,
 } from "./policy.js";
+import { parseReview } from "./review.js";
 
 export interface PrepushCandidate {
   branch: string;
@@ -127,7 +128,7 @@ export function selectPrepushRequest(
     latest &&
     snapshot.comments.some(
       (comment) =>
-        comment.body.includes("agent-review") &&
+        parseReview(comment.body).kind !== "absent" &&
         Object.values(config.trustedAuthorIds).some((ids) => ids.includes(comment.authorId)) &&
         (Date.parse(comment.updatedAt) > latest.time ||
           (Date.parse(comment.updatedAt) === latest.time && comment.id >= latest.id)),

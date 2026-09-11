@@ -10,6 +10,7 @@ import {
   type ReviewComment,
 } from "./policy.js";
 import { selectPrepushRequest } from "./prepush.js";
+import { parseReview } from "./review.js";
 
 const AuthorIds = z
   .array(
@@ -47,34 +48,11 @@ const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(valu
 function latestEvidence(snapshot: CoordinationSnapshot, config: CoordinationConfig) {
   const latest: Partial<Record<Agent, ReviewComment>> = {};
   for (const comment of snapshot.comments) {
-    if (comment.body.split("agent-review").length !== 2) continue;
-    const envelopes = [...comment.body.matchAll(/<!--([\s\S]*?)-->/g)].filter((match) =>
-      match[1]?.includes("agent-review"),
-    );
-    if (envelopes.length !== 1) continue;
-    const lines = envelopes[0]?.[1]?.trim().split(/\r?\n/);
-    if (lines?.shift() !== "agent-review:v1") continue;
-    const fields: Record<string, string> = {};
-    let valid = true;
-    for (const line of lines) {
-      const match = /^([a-z-]+):\s*(\S.*?)\s*$/.exec(line.trim());
-      if (
-        !match?.[1] ||
-        !match[2] ||
-        !["reviewer", "decision", "head-sha"].includes(match[1]) ||
-        Object.hasOwn(fields, match[1])
-      ) {
-        valid = false;
-        break;
-      }
-      fields[match[1]] = match[2];
-    }
-    const agent = fields.reviewer;
+    const review = parseReview(comment.body);
+    if (review.kind !== "review") continue;
+    const agent = review.reviewer;
     if (
-      !valid ||
-      (agent !== "codex" && agent !== "hermes") ||
-      !["approve", "revise", "reject"].includes(fields.decision ?? "") ||
-      fields["head-sha"] !== snapshot.headSha ||
+      review.headSha !== snapshot.headSha ||
       !config.trustedAuthorIds[agent].includes(comment.authorId)
     )
       continue;
