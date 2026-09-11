@@ -1,3 +1,4 @@
+import { parseReview } from "./review.js";
 export type Agent = "codex" | "hermes";
 export interface ReviewComment {
   authorId: string;
@@ -137,23 +138,11 @@ export function evaluateCoordination(
   const latest: Partial<Record<Agent, Vote>> = {};
   const seen = new Set<number>();
   for (const comment of snapshot.comments) {
-    if (
-      !agents.some((agent) => config.trustedAuthorIds[agent].includes(comment.authorId)) ||
-      !comment.body.includes("agent-review")
-    )
+    if (!agents.some((agent) => config.trustedAuthorIds[agent].includes(comment.authorId)))
       continue;
-    const review = parseEnvelope(comment.body, "agent-review", [
-      "reviewer",
-      "decision",
-      "head-sha",
-    ]);
-    if (
-      !review ||
-      !isAgent(review.reviewer) ||
-      !["approve", "revise", "reject"].includes(review.decision ?? "") ||
-      !validSha(review["head-sha"] ?? null)
-    )
-      return result("blocked", "Malformed trusted review");
+    const review = parseReview(comment.body);
+    if (review.kind === "absent") continue;
+    if (review.kind !== "review") return result("blocked", "Malformed trusted review");
     if (!config.trustedAuthorIds[review.reviewer].includes(comment.authorId)) continue;
     const time = Date.parse(comment.updatedAt);
     if (
@@ -165,7 +154,7 @@ export function evaluateCoordination(
       return result("blocked", "Invalid or duplicate review ordering evidence");
     }
     seen.add(comment.id);
-    if (review["head-sha"] !== snapshot.headSha) continue;
+    if (review.headSha !== snapshot.headSha) continue;
     const previous = latest[review.reviewer];
     if (!previous || time > previous.time || (time === previous.time && comment.id > previous.id)) {
       latest[review.reviewer] = { decision: review.decision ?? "", time, id: comment.id };

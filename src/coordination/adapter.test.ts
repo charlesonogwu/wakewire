@@ -607,6 +607,46 @@ function prepushFixture(enabled?: boolean) {
   return f;
 }
 describe("opt-in prepush through Desktop receipts", () => {
+  it("ignores a later prose summary when resubmitting a correction", async () => {
+    const f = prepushFixture(true);
+    f.state.labels.push("changes-requested:hermes");
+    f.state.comments.push(vote("codex", "revise"));
+    f.state.comments.push({
+      ...vote("hermes"),
+      id: 99,
+      updated_at: "2026-09-10T13:00:00Z",
+      body: "agent-review:v1 is the review protocol, no new verdict.",
+    });
+    await f.adapter.deliverToThread("test-thread", "wake", opts());
+    expect(f.sent).toHaveLength(1);
+    expect(String(f.sent[0]?.prompt)).toContain("Action: prepush");
+  });
+  it("keeps both approval evidence entries with prose alongside the envelope", async () => {
+    const f = fixture();
+    f.state.comments = [
+      vote("codex"),
+      {
+        ...vote("hermes"),
+        body: `${vote("hermes").body}\nThe agent-review:v1 convention applies.`,
+      },
+    ];
+    await f.adapter.deliverToThread("test-thread", "wake", opts());
+    expect(String(f.sent[0]?.prompt)).toContain("Action: ready");
+    expect(String(f.sent[0]?.prompt)).toContain('"agent":"hermes"');
+  });
+  it("does not emit a block or duplicate readiness when a summary follows approval", async () => {
+    const f = fixture();
+    f.state.comments = [vote("codex"), vote("hermes")];
+    await f.adapter.deliverToThread("test-thread", "wake", opts());
+    f.state.comments.push({
+      ...vote("hermes"),
+      id: 99,
+      body: "Final handoff: agent-review:v1 verdicts are already posted.",
+    });
+    await f.adapter.deliverToThread("test-thread", "summary", opts("summary"));
+    expect(f.sent).toHaveLength(1);
+    expect(String(f.sent[0]?.prompt)).toContain("Action: ready");
+  });
   it("wakes once for a correction without clearing the old Revise label", async () => {
     const f = prepushFixture(true);
     f.state.labels.push("changes-requested:hermes");

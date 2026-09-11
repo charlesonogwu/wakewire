@@ -98,6 +98,16 @@ hook is installed merely by these code changes.
 
 ## Unpublished candidate verification
 
+Review declarations are explicit HTML envelopes beginning with the review marker.
+Ordinary sentences or inline code mentioning the protocol name are not votes and
+do not invalidate earlier votes, even when a sentence starts with the protocol
+name. A bare declaration line means the marker (and optional version) alone on
+its line, without prose. Such a line, or a duplicate or incomplete
+envelope, unsupported version, or missing/unknown fields still fails closed.
+Decision evaluation, evidence extraction and correction freshness use the same
+parser. Summaries cannot manufacture approval, override a rejection or cause a
+duplicate readiness notification.
+
 The optional `prepushEnabled` coordination setting recognizes a separate
 `agent-prepush:v1` envelope from the configured trusted peer author. It is not
 an approval envelope. It names only the current assigned branch, expected old
