@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import type { DaemonState } from "./daemon/daemon.js";
-import { acquireExclusiveOwnership, releaseExclusiveOwnership } from "./exclusive-ownership.js";
+import {
+  acquireExclusiveOwnership,
+  pidIsAlive,
+  releaseExclusiveOwnership,
+} from "./exclusive-ownership.js";
 import { daemonLockFilePath, stateFilePath } from "./paths.js";
 
 /** Shared by the CLI and the MCP server to talk to the daemon's localhost API. */
@@ -80,15 +84,6 @@ export type DaemonInspection =
   | { status: "foreign"; detail: string }
   | { status: "uncertain"; detail: string };
 
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function timedRequest<T>(
   request: FetchLike,
   url: string,
@@ -153,9 +148,15 @@ async function verifyPublicIdentity(state: DaemonState, request: FetchLike): Pro
 export async function inspectDaemonState(
   state: DaemonState,
   request: FetchLike = fetch,
-  pidAlive: PidAlive = processIsAlive,
+  pidAlive: PidAlive = pidIsAlive,
 ): Promise<DaemonInspection> {
-  if (!pidAlive(state.pid)) return { status: "stale", detail: "saved process no longer exists" };
+  let alive: boolean;
+  try {
+    alive = pidAlive(state.pid);
+  } catch (error) {
+    alive = (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+  if (!alive) return { status: "stale", detail: "saved process no longer exists" };
   if (!state.instanceId) {
     return { status: "uncertain", detail: "legacy state has no verifiable instance identity" };
   }
@@ -200,7 +201,10 @@ export async function apiFetch<T = unknown>(
         },
         ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
       },
-      async (response, signal) => ({ response, body: await readJson(response, signal) }),
+      async (response, signal) => ({
+        response,
+        body: mutation ? await response.json() : await readJson(response, signal),
+      }),
       mutation ? 2_000 : 5_000,
     );
     return { status: result.response.status, body: result.body as T };

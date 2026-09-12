@@ -13,12 +13,17 @@ export class OwnershipBusyError extends Error {
   }
 }
 
-function processIsAlive(pid: number): boolean {
+type SignalProcess = (pid: number, signal: 0) => void;
+
+export function pidIsAlive(
+  pid: number,
+  signalProcess: SignalProcess = (target, signal) => process.kill(target, signal),
+): boolean {
   try {
-    process.kill(pid, 0);
+    signalProcess(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
 }
 
@@ -31,14 +36,19 @@ function readOwner(file: string): ExclusiveOwner {
 }
 
 function createOwner(file: string, owner: ExclusiveOwner): number {
-  const handle = fs.openSync(file, "wx", 0o600);
+  const candidate = `${file}.${process.pid}.${randomUUID()}.candidate`;
+  const handle = fs.openSync(candidate, "wx", 0o600);
   try {
     fs.writeFileSync(handle, JSON.stringify(owner));
     fs.fsyncSync(handle);
+    // A hard link publishes complete owner metadata without replacing an
+    // existing owner and without exposing an empty lock if this process dies.
+    fs.linkSync(candidate, file);
+    fs.rmSync(candidate, { force: true });
     return handle;
   } catch (error) {
     fs.closeSync(handle);
-    fs.rmSync(file, { force: true });
+    fs.rmSync(candidate, { force: true });
     throw error;
   }
 }
@@ -47,7 +57,11 @@ function createOwner(file: string, owner: ExclusiveOwner): number {
  * Claims an ownership file. Stale replacement is serialized by a second,
  * cross-process exclusive file so an observer can never unlink a new owner.
  */
-export function acquireExclusiveOwnership(file: string, owner: ExclusiveOwner): number {
+export function acquireExclusiveOwnership(
+  file: string,
+  owner: ExclusiveOwner,
+  isAlive: (pid: number) => boolean = pidIsAlive,
+): number {
   try {
     return createOwner(file, owner);
   } catch (error) {
@@ -60,20 +74,12 @@ export function acquireExclusiveOwnership(file: string, owner: ExclusiveOwner): 
   } catch {
     throw new Error("Ownership is present but cannot be verified");
   }
-  if (processIsAlive(observed.pid)) {
+  if (isAlive(observed.pid)) {
     throw new OwnershipBusyError();
   }
 
   const takeoverFile = `${file}.takeover`;
-  let takeoverHandle: number;
-  try {
-    takeoverHandle = fs.openSync(takeoverFile, "wx", 0o600);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      throw new OwnershipBusyError("Ownership takeover is already in progress");
-    }
-    throw error;
-  }
+  const takeoverHandle = acquireExclusiveOwnership(takeoverFile, owner, isAlive);
 
   try {
     // Revalidate while holding the cross-process takeover gate. Another
@@ -82,14 +88,13 @@ export function acquireExclusiveOwnership(file: string, owner: ExclusiveOwner): 
     if (current.pid !== observed.pid || current.instanceId !== observed.instanceId) {
       throw new OwnershipBusyError();
     }
-    if (processIsAlive(current.pid)) {
+    if (isAlive(current.pid)) {
       throw new OwnershipBusyError();
     }
     fs.rmSync(file);
     return createOwner(file, owner);
   } finally {
-    fs.closeSync(takeoverHandle);
-    fs.rmSync(takeoverFile, { force: true });
+    releaseExclusiveOwnership(takeoverFile, takeoverHandle, owner);
   }
 }
 

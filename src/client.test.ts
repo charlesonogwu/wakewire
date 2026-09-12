@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -25,11 +26,11 @@ afterEach(() => {
   for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true });
 });
 
-function installState(): void {
+function installState(overrides: Partial<DaemonState> = {}): void {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "wakewire-client-"));
   homes.push(home);
   process.env.WAKEWIRE_HOME = home;
-  fs.writeFileSync(path.join(home, "daemon.json"), JSON.stringify(state));
+  fs.writeFileSync(path.join(home, "daemon.json"), JSON.stringify({ ...state, ...overrides }));
 }
 
 function stalledJsonResponse(signal: AbortSignal | null | undefined): Response {
@@ -143,6 +144,37 @@ describe("apiFetch", () => {
     await assertion;
     expect(request).toHaveBeenCalledTimes(2);
   });
+
+  it("reports an uncertain outcome after HTTP 201 headers when the response body aborts", async () => {
+    let mutations = 0;
+    const server = http.createServer((request, response) => {
+      if (request.url === "/api/identity") {
+        response.setHeader("content-type", "application/json");
+        response.end(
+          JSON.stringify({ service: "wakewire", instanceId: state.instanceId, pid: state.pid }),
+        );
+        return;
+      }
+      mutations += 1;
+      response.writeHead(201, { "content-type": "application/json" });
+      response.flushHeaders();
+      response.write('{"created":');
+      setTimeout(() => response.destroy(), 10);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server did not listen");
+    installState({ port: address.port });
+
+    try {
+      await expect(
+        apiFetch("/api/routes", { method: "POST", body: { name: "one" } }),
+      ).rejects.toMatchObject({ name: "DaemonRequestUncertainError" });
+      expect(mutations).toBe(1);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
 });
 
 describe("inspectDaemonState", () => {
@@ -205,6 +237,20 @@ describe("inspectDaemonState", () => {
       status: "stale",
     });
     expect(request).not.toHaveBeenCalled();
+  });
+
+  it("treats EPERM while probing a pid as alive and identity-uncertain", async () => {
+    const request = vi.fn(async () => {
+      throw new Error("endpoint unavailable");
+    });
+    const denied = Object.assign(new Error("operation not permitted"), { code: "EPERM" });
+
+    await expect(
+      inspectDaemonState(state, request, () => {
+        throw denied;
+      }),
+    ).resolves.toMatchObject({ status: "uncertain" });
+    expect(request).toHaveBeenCalledTimes(1);
   });
 
   it("fails closed for a legacy live state without an instance identity", async () => {
