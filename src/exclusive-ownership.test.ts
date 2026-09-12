@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   acquireExclusiveOwnership,
   type ExclusiveOwner,
@@ -96,6 +96,44 @@ acquireExclusiveOwnership(role === "primary" ? file : file + ".takeover", {
       acquireWithLiveness(file, { pid: 203, instanceId: "contender" }, (pid) => pid === 202),
     ).toThrow(/already owns|takeover/i);
     expect(JSON.parse(fs.readFileSync(`${file}.takeover`, "utf8"))).toEqual(gateOwner);
+  });
+});
+
+describe("exclusive ownership publication", () => {
+  it("keeps published ownership usable after transient private-candidate cleanup failure", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "wakewire-owner-publish-"));
+    directories.push(directory);
+    const file = path.join(directory, "daemon.lock");
+    const firstOwner = { pid: process.pid, instanceId: "first-owner" };
+    const secondOwner = { pid: process.pid, instanceId: "second-owner" };
+    const originalRemove = fs.rmSync.bind(fs);
+    let injected = false;
+    const remove = vi.spyOn(fs, "rmSync").mockImplementation((target, options) => {
+      if (!injected && String(target).endsWith(".candidate")) {
+        injected = true;
+        throw Object.assign(new Error("candidate unlink denied"), { code: "EPERM" });
+      }
+      return originalRemove(target, options as Parameters<typeof fs.rmSync>[1]);
+    });
+    let firstHandle: number | undefined;
+    let secondHandle: number | undefined;
+
+    try {
+      firstHandle = acquireExclusiveOwnership(file, firstOwner);
+      expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual(firstOwner);
+      expect(() => acquireExclusiveOwnership(file, secondOwner)).toThrow(/already owns/i);
+
+      releaseExclusiveOwnership(file, firstHandle, firstOwner);
+      firstHandle = undefined;
+      secondHandle = acquireExclusiveOwnership(file, secondOwner);
+      expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual(secondOwner);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(fs.readdirSync(directory).filter((name) => name.endsWith(".candidate"))).toEqual([]);
+    } finally {
+      if (firstHandle !== undefined) releaseExclusiveOwnership(file, firstHandle, firstOwner);
+      if (secondHandle !== undefined) releaseExclusiveOwnership(file, secondHandle, secondOwner);
+      remove.mockRestore();
+    }
   });
 });
 

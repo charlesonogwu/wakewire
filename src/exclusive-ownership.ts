@@ -35,22 +35,41 @@ function readOwner(file: string): ExclusiveOwner {
   return owner;
 }
 
+interface FileIdentity {
+  dev: number;
+  ino: number;
+}
+
+function removeCandidateIfOwned(candidate: string, identity: FileIdentity): boolean {
+  try {
+    const current = fs.statSync(candidate);
+    if (current.dev !== identity.dev || current.ino !== identity.ino) return true;
+    fs.rmSync(candidate, { force: true });
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT";
+  }
+}
+
 function createOwner(file: string, owner: ExclusiveOwner): number {
   const candidate = `${file}.${process.pid}.${randomUUID()}.candidate`;
   const handle = fs.openSync(candidate, "wx", 0o600);
+  const identity = fs.fstatSync(handle);
   try {
     fs.writeFileSync(handle, JSON.stringify(owner));
     fs.fsyncSync(handle);
     // A hard link publishes complete owner metadata without replacing an
     // existing owner and without exposing an empty lock if this process dies.
     fs.linkSync(candidate, file);
-    fs.rmSync(candidate, { force: true });
-    return handle;
   } catch (error) {
     fs.closeSync(handle);
-    fs.rmSync(candidate, { force: true });
+    removeCandidateIfOwned(candidate, identity);
     throw error;
   }
+  if (!removeCandidateIfOwned(candidate, identity)) {
+    queueMicrotask(() => removeCandidateIfOwned(candidate, identity));
+  }
+  return handle;
 }
 
 /**
