@@ -8,7 +8,7 @@ import { CodexAppServerAdapter } from "./codex-app-server.js";
 import { CodexDesktopAdapter } from "./codex-desktop.js";
 import { CodexExecAdapter } from "./codex-exec.js";
 import { CodexSdkAdapter } from "./codex-sdk.js";
-import { DesktopMcpClient } from "./desktop-mcp.js";
+import { RefreshingDesktopMcpClient } from "./desktop-refreshing-client.js";
 import type { AgentAdapter } from "./types.js";
 
 export function createAdapter(config: DaemonConfig, logger: Logger): AgentAdapter {
@@ -29,7 +29,7 @@ export function createAdapter(config: DaemonConfig, logger: Logger): AgentAdapte
         })
         .strict()
         .parse(JSON.parse(readFileSync(file, "utf8")));
-      const desktop = new CodexDesktopAdapter(registration, new DesktopMcpClient(registration));
+      const desktop = new CodexDesktopAdapter(registration, new RefreshingDesktopMcpClient(file));
       return registration.coordination
         ? new CoordinationAdapter(
             registration.coordination,

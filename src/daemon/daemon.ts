@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import type { Server } from "node:http";
 import { serve } from "@hono/node-server";
@@ -6,8 +7,13 @@ import { DeliveryQueue } from "../core/queue.js";
 import { matchRoutes } from "../core/router.js";
 import { openDatabase } from "../db/db.js";
 import { createStores } from "../db/repos.js";
+import {
+  acquireExclusiveOwnership,
+  type ExclusiveOwner,
+  releaseExclusiveOwnership,
+} from "../exclusive-ownership.js";
 import type { Logger } from "../logging.js";
-import { stateFilePath, wakewireHome } from "../paths.js";
+import { daemonLockFilePath, stateFilePath, wakewireHome } from "../paths.js";
 import { createSecretStore } from "../secrets/store.js";
 import { createAdapter } from "../sinks/factory.js";
 import { prepareWorktree } from "../sinks/worktree.js";
@@ -21,8 +27,27 @@ export interface DaemonState {
   pid: number;
   port: number;
   token: string;
+  instanceId?: string;
   startedAt: string;
   version: string;
+}
+
+function publishState(state: DaemonState): void {
+  const file = stateFilePath();
+  const temporary = `${file}.${state.instanceId}.tmp`;
+  let handle: number | undefined;
+  try {
+    handle = fs.openSync(temporary, "wx", 0o600);
+    fs.writeFileSync(handle, JSON.stringify(state, null, 2));
+    fs.fsyncSync(handle);
+    fs.closeSync(handle);
+    handle = undefined;
+    fs.renameSync(temporary, file);
+  } catch (error) {
+    if (handle !== undefined) fs.closeSync(handle);
+    fs.rmSync(temporary, { force: true });
+    throw error;
+  }
 }
 
 export class Daemon {
@@ -32,12 +57,35 @@ export class Daemon {
   private ingressServer: Server | null = null;
   private adapter: import("../sinks/types.js").AgentAdapter | null = null;
   private db: ReturnType<typeof openDatabase> | null = null;
+  private owner: ExclusiveOwner | null = null;
+  private ownershipHandle: number | null = null;
+  private publishedState: DaemonState | null = null;
+  private stopping: Promise<void> | null = null;
+  private readonly stopped: Promise<void>;
+  private resolveStopped: (() => void) | null = null;
 
-  constructor(private readonly logger: Logger) {}
+  constructor(private readonly logger: Logger) {
+    this.stopped = new Promise((resolve) => {
+      this.resolveStopped = resolve;
+    });
+  }
 
   async start(): Promise<DaemonState> {
-    const ingress = githubIngressConfig(process.env);
     fs.mkdirSync(wakewireHome(), { recursive: true });
+    const instanceId = randomUUID();
+    const owner = { pid: process.pid, instanceId };
+    this.ownershipHandle = acquireExclusiveOwnership(daemonLockFilePath(), owner);
+    this.owner = owner;
+    try {
+      return await this.startOwned(instanceId);
+    } catch (error) {
+      await this.stop();
+      throw error;
+    }
+  }
+
+  private async startOwned(instanceId: string): Promise<DaemonState> {
+    const ingress = githubIngressConfig(process.env);
     this.db = openDatabase();
     const stores = createStores(this.db);
     const config = loadConfig(stores.settings);
@@ -77,6 +125,10 @@ export class Daemon {
       config,
       logger: this.logger,
       startedAt,
+      instanceId,
+      requestShutdown: () => {
+        void this.stop();
+      },
     });
 
     const port = await new Promise<number>((resolve) => {
@@ -91,11 +143,12 @@ export class Daemon {
       pid: process.pid,
       port,
       token: config.apiToken,
+      instanceId,
       startedAt,
       version: VERSION,
     };
-    fs.writeFileSync(stateFilePath(), JSON.stringify(state, null, 2), { mode: 0o600 });
-    fs.chmodSync(stateFilePath(), 0o600);
+    publishState(state);
+    this.publishedState = state;
 
     queue.start();
     await sources.startAll();
@@ -130,13 +183,25 @@ export class Daemon {
     return state;
   }
 
-  async stop(): Promise<void> {
+  waitUntilStopped(): Promise<void> {
+    return this.stopped;
+  }
+
+  stop(): Promise<void> {
+    this.stopping ??= this.stopOwned().finally(() => {
+      this.resolveStopped?.();
+      this.resolveStopped = null;
+    });
+    return this.stopping;
+  }
+
+  private async stopOwned(): Promise<void> {
     this.logger.info("daemon shutting down");
     this.queue?.stop();
     await this.sources?.stopAll();
     // Kills adapter connections AND any shared app-server child it owns —
     // otherwise the hard exit below orphans the spawned server.
-    this.adapter?.close?.();
+    await this.adapter?.close?.();
     await new Promise<void>((resolve) => {
       if (!this.ingressServer) return resolve();
       this.ingressServer.close(() => resolve());
@@ -148,9 +213,20 @@ export class Daemon {
     this.db?.close();
     try {
       const state = JSON.parse(fs.readFileSync(stateFilePath(), "utf8")) as DaemonState;
-      if (state.pid === process.pid) fs.unlinkSync(stateFilePath());
+      if (
+        this.publishedState?.instanceId &&
+        state.instanceId === this.publishedState.instanceId &&
+        state.pid === this.publishedState.pid
+      ) {
+        fs.unlinkSync(stateFilePath());
+      }
     } catch {
       // state file already gone
+    }
+    if (this.ownershipHandle !== null && this.owner) {
+      releaseExclusiveOwnership(daemonLockFilePath(), this.ownershipHandle, this.owner);
+      this.ownershipHandle = null;
+      this.owner = null;
     }
   }
 }
@@ -159,13 +235,14 @@ export class Daemon {
 export async function runDaemon(logger: Logger): Promise<void> {
   const daemon = new Daemon(logger);
   await daemon.start();
-  await new Promise<void>((resolve) => {
-    const shutdown = () => {
-      void daemon.stop().finally(resolve);
-    };
-    process.once("SIGINT", shutdown);
-    process.once("SIGTERM", shutdown);
-  });
+  const shutdown = () => {
+    void daemon.stop();
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+  await daemon.waitUntilStopped();
+  process.off("SIGINT", shutdown);
+  process.off("SIGTERM", shutdown);
   // Lingering source sockets (e.g. a tarpitted IMAP connect) must not keep a
   // cleanly-stopped daemon alive as a zombie.
   process.exit(0);

@@ -47,6 +47,13 @@ it("serves only signed ingress on the separate port and closes it on shutdown", 
   try {
     const state = await daemon.start();
     expect(state.port).not.toBe(port);
+    const identity = await fetch(`http://127.0.0.1:${state.port}/api/identity`);
+    expect(identity.status).toBe(200);
+    expect(await identity.json()).toEqual({
+      service: "wakewire",
+      instanceId: state.instanceId,
+      pid: state.pid,
+    });
     const body = JSON.stringify({ zen: "synthetic" });
     const response = await fetch(`http://127.0.0.1:${port}/github`, {
       method: "POST",

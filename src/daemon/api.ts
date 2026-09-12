@@ -26,6 +26,8 @@ export interface ApiContext {
   config: DaemonConfig;
   logger: Logger;
   startedAt: string;
+  instanceId: string;
+  requestShutdown: () => void;
 }
 
 /**
@@ -36,7 +38,15 @@ export interface ApiContext {
 export function createApi(ctx: ApiContext): Hono {
   const app = new Hono();
 
+  app.get("/api/identity", (c) =>
+    c.json({ service: "wakewire", instanceId: ctx.instanceId, pid: process.pid }),
+  );
+
   app.use("/api/*", async (c, next) => {
+    if (c.req.path === "/api/identity") {
+      await next();
+      return;
+    }
     const header = c.req.header("authorization") ?? "";
     const token = header.startsWith("Bearer ") ? header.slice(7) : "";
     if (!timingSafeEqual(token, ctx.config.apiToken)) {
@@ -51,12 +61,24 @@ export function createApi(ctx: ApiContext): Hono {
       status: "ok",
       version: VERSION,
       pid: process.pid,
+      instanceId: ctx.instanceId,
       startedAt: ctx.startedAt,
       adapter: { name: ctx.adapter.name, codexReachable: reachable },
       queueDepth: ctx.queue.queueDepth(),
       sources: ctx.sources.statuses(),
       secretsBackend: ctx.secrets.backend,
     });
+  });
+
+  app.post("/api/shutdown", async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const parsed = z.object({ instanceId: z.string() }).strict().safeParse(body);
+    if (!parsed.success) return c.json({ error: "invalid shutdown request" }, 400);
+    if (parsed.data.instanceId !== ctx.instanceId) {
+      return c.json({ error: "daemon instance changed" }, 409);
+    }
+    setImmediate(ctx.requestShutdown);
+    return c.json({ ok: true }, 202);
   });
 
   // --- routes ---

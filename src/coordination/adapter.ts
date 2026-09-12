@@ -195,7 +195,7 @@ export class CoordinationAdapter implements AgentAdapter {
     return this.inner.probe();
   }
   close() {
-    this.inner.close?.();
+    return this.inner.close?.();
   }
 }
 

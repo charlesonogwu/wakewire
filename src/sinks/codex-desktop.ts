@@ -12,7 +12,7 @@ import {
 
 export interface DesktopToolClient {
   call(name: string, args: Record<string, unknown>): Promise<unknown>;
-  close(): void;
+  close(): void | Promise<void>;
 }
 export interface DesktopConfig {
   threadId: string;
@@ -171,8 +171,8 @@ export class CodexDesktopAdapter implements AgentAdapter {
       return false;
     }
   }
-  close() {
-    this.client.close();
+  async close() {
+    await this.client.close();
     if (this.db.open) this.db.close();
   }
 }

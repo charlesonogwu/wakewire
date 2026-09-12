@@ -9,14 +9,20 @@ import { authSlack } from "./cli/auth-slack.js";
 import { authWebhook } from "./cli/auth-webhook.js";
 import { configGet, configList, configSet } from "./cli/config-cmd.js";
 import { installService, uninstallService } from "./cli/service.js";
-import { apiFetch, readDaemonState } from "./client.js";
+import {
+  apiFetch,
+  inspectDaemonState,
+  readDaemonState,
+  removeDaemonStateIfCurrent,
+} from "./client.js";
 import { loadConfig } from "./config.js";
 import { runDaemon } from "./daemon/daemon.js";
 import { openDatabase } from "./db/db.js";
 import { createStores } from "./db/repos.js";
 import { createLogger } from "./logging.js";
 import { runMcpServer } from "./mcp/server.js";
-import { logFilePath, stateFilePath, wakewireHome } from "./paths.js";
+import { logFilePath, wakewireHome } from "./paths.js";
+import { refreshDesktopRegistration } from "./sinks/desktop-registration.js";
 import { VERSION } from "./version.js";
 
 const cliPath = fileURLToPath(import.meta.url);
@@ -48,10 +54,25 @@ program
   .option("-d, --detach", "fork to the background and return")
   .action(async (opts: { detach?: boolean }) => {
     const existing = readDaemonState();
-    if (existing && processAlive(existing.pid)) {
-      console.error(`daemon already running (pid ${existing.pid}, port ${existing.port})`);
-      process.exitCode = 1;
-      return;
+    if (existing) {
+      const inspection = await inspectDaemonState(existing);
+      if (inspection.status === "reachable") {
+        console.error(`daemon already running (pid ${existing.pid}, port ${existing.port})`);
+        process.exitCode = 1;
+        return;
+      }
+      if (inspection.status === "uncertain") {
+        console.error(
+          `cannot verify daemon identity: ${inspection.detail}; refusing to start another`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      if (!removeDaemonStateIfCurrent(existing)) {
+        console.error("daemon state changed during inspection; refusing to start another");
+        process.exitCode = 1;
+        return;
+      }
     }
     if (opts.detach) {
       const child = spawn(process.execPath, [cliPath, "start"], {
@@ -68,15 +89,37 @@ program
 program
   .command("stop")
   .description("Stop the running daemon")
-  .action(() => {
+  .action(async () => {
     const state = readDaemonState();
-    if (!state || !processAlive(state.pid)) {
+    if (!state) {
       console.log("daemon is not running");
-      fs.rmSync(stateFilePath(), { force: true });
       return;
     }
-    process.kill(state.pid, "SIGTERM");
-    console.log(`sent SIGTERM to pid ${state.pid}`);
+    const inspection = await inspectDaemonState(state);
+    if (inspection.status === "uncertain") {
+      console.error(
+        `cannot verify daemon identity: ${inspection.detail}; refusing to signal the pid`,
+      );
+      process.exitCode = 1;
+      return;
+    }
+    if (inspection.status !== "reachable") {
+      if (!removeDaemonStateIfCurrent(state)) {
+        console.error("daemon state changed during inspection; shutdown outcome is uncertain");
+        process.exitCode = 1;
+        return;
+      }
+      console.log("daemon is not running");
+      return;
+    }
+    const response = await apiFetch<{ ok?: boolean; error?: string }>("/api/shutdown", {
+      method: "POST",
+      body: { instanceId: state.instanceId },
+    });
+    if (response.status < 200 || response.status >= 300 || response.body.ok !== true) {
+      throw new Error(response.body.error ?? "daemon rejected the shutdown request");
+    }
+    console.log(`shutdown requested for daemon instance ${state.instanceId}`);
   });
 
 program
@@ -84,8 +127,17 @@ program
   .description("Show daemon status, sources, and queue depth")
   .action(async () => {
     const state = readDaemonState();
-    if (!state || !processAlive(state.pid)) {
+    if (!state) {
       console.log("daemon: not running");
+      return;
+    }
+    const inspection = await inspectDaemonState(state);
+    if (inspection.status !== "reachable") {
+      console.log(
+        inspection.status === "uncertain"
+          ? `daemon: identity uncertain (${inspection.detail})`
+          : "daemon: not running",
+      );
       return;
     }
     try {
@@ -187,20 +239,19 @@ service
   });
 
 program
+  .command("desktop-refresh <registration>")
+  .description("Refresh a registered Codex Desktop connector after an app restart or update")
+  .action(async (registration: string) => {
+    const changed = await refreshDesktopRegistration(registration);
+    console.log(changed ? "Desktop registration refreshed" : "Desktop registration is current");
+  });
+
+program
   .command("mcp")
   .description("Run the wakewire MCP server on stdio (used by the Codex plugin)")
   .action(async () => {
     await runMcpServer();
   });
-
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 program.parseAsync().catch((err) => {
   console.error(err instanceof Error ? err.message : err);
