@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { withExclusiveFileLock } from "../exclusive-ownership.js";
 import { CodexDesktopAdapter } from "./codex-desktop.js";
 import { DesktopMcpClient } from "./desktop-mcp.js";
 
@@ -55,7 +56,8 @@ export async function selectDesktopConnector(
 
 export function newestConnectorServers(servers: string[]): string[] {
   const parsed = servers.map((serverPath) => {
-    const version = path.basename(path.dirname(serverPath));
+    const segments = serverPath.replaceAll("\\", "/").split("/");
+    const version = segments.at(-2) ?? "";
     if (!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(version)) {
       throw new Error(`Invalid connector version: ${version}`);
     }
@@ -113,7 +115,7 @@ async function probeDesktopConnector(
   } catch {
     return false;
   } finally {
-    adapter?.close();
+    await adapter?.close();
   }
 }
 
@@ -128,7 +130,9 @@ export async function refreshDesktopRegistration(
   const key = path.resolve(file);
   const previous = registrationRefreshes.get(key);
   const refresh = (previous ? previous.catch(() => false) : Promise.resolve(false)).then(() =>
-    refreshDesktopRegistrationOnce(file, dependencies),
+    withExclusiveFileLock(`${key}.refresh.lock`, () =>
+      refreshDesktopRegistrationOnce(file, dependencies),
+    ),
   );
   registrationRefreshes.set(key, refresh);
   try {

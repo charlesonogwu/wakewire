@@ -7,6 +7,11 @@ import { DeliveryQueue } from "../core/queue.js";
 import { matchRoutes } from "../core/router.js";
 import { openDatabase } from "../db/db.js";
 import { createStores } from "../db/repos.js";
+import {
+  acquireExclusiveOwnership,
+  type ExclusiveOwner,
+  releaseExclusiveOwnership,
+} from "../exclusive-ownership.js";
 import type { Logger } from "../logging.js";
 import { daemonLockFilePath, stateFilePath, wakewireHome } from "../paths.js";
 import { createSecretStore } from "../secrets/store.js";
@@ -25,64 +30,6 @@ export interface DaemonState {
   instanceId?: string;
   startedAt: string;
   version: string;
-}
-
-interface DaemonOwner {
-  pid: number;
-  instanceId: string;
-}
-
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function acquireOwnership(owner: DaemonOwner): number {
-  const file = daemonLockFilePath();
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const handle = fs.openSync(file, "wx", 0o600);
-      try {
-        fs.writeFileSync(handle, JSON.stringify(owner));
-        fs.fsyncSync(handle);
-        return handle;
-      } catch (error) {
-        fs.closeSync(handle);
-        fs.rmSync(file, { force: true });
-        throw error;
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      let existing: DaemonOwner | undefined;
-      try {
-        existing = JSON.parse(fs.readFileSync(file, "utf8")) as DaemonOwner;
-      } catch {
-        throw new Error("Daemon ownership is present but cannot be verified");
-      }
-      if (!Number.isInteger(existing.pid) || !existing.instanceId || processIsAlive(existing.pid)) {
-        throw new Error("Another daemon already owns this wakewire home");
-      }
-      fs.rmSync(file, { force: true });
-    }
-  }
-  throw new Error("Could not acquire daemon ownership");
-}
-
-function releaseOwnership(handle: number, owner: DaemonOwner): void {
-  try {
-    const current = JSON.parse(fs.readFileSync(daemonLockFilePath(), "utf8")) as DaemonOwner;
-    if (current.pid === owner.pid && current.instanceId === owner.instanceId) {
-      fs.rmSync(daemonLockFilePath(), { force: true });
-    }
-  } catch {
-    // The lock was already removed or replaced.
-  } finally {
-    fs.closeSync(handle);
-  }
 }
 
 function publishState(state: DaemonState): void {
@@ -110,7 +57,7 @@ export class Daemon {
   private ingressServer: Server | null = null;
   private adapter: import("../sinks/types.js").AgentAdapter | null = null;
   private db: ReturnType<typeof openDatabase> | null = null;
-  private owner: DaemonOwner | null = null;
+  private owner: ExclusiveOwner | null = null;
   private ownershipHandle: number | null = null;
   private publishedState: DaemonState | null = null;
   private stopping: Promise<void> | null = null;
@@ -127,7 +74,7 @@ export class Daemon {
     fs.mkdirSync(wakewireHome(), { recursive: true });
     const instanceId = randomUUID();
     const owner = { pid: process.pid, instanceId };
-    this.ownershipHandle = acquireOwnership(owner);
+    this.ownershipHandle = acquireExclusiveOwnership(daemonLockFilePath(), owner);
     this.owner = owner;
     try {
       return await this.startOwned(instanceId);
@@ -254,7 +201,7 @@ export class Daemon {
     await this.sources?.stopAll();
     // Kills adapter connections AND any shared app-server child it owns —
     // otherwise the hard exit below orphans the spawned server.
-    this.adapter?.close?.();
+    await this.adapter?.close?.();
     await new Promise<void>((resolve) => {
       if (!this.ingressServer) return resolve();
       this.ingressServer.close(() => resolve());
@@ -277,7 +224,7 @@ export class Daemon {
       // state file already gone
     }
     if (this.ownershipHandle !== null && this.owner) {
-      releaseOwnership(this.ownershipHandle, this.owner);
+      releaseExclusiveOwnership(daemonLockFilePath(), this.ownershipHandle, this.owner);
       this.ownershipHandle = null;
       this.owner = null;
     }

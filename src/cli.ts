@@ -9,14 +9,19 @@ import { authSlack } from "./cli/auth-slack.js";
 import { authWebhook } from "./cli/auth-webhook.js";
 import { configGet, configList, configSet } from "./cli/config-cmd.js";
 import { installService, uninstallService } from "./cli/service.js";
-import { apiFetch, inspectDaemonState, readDaemonState } from "./client.js";
+import {
+  apiFetch,
+  inspectDaemonState,
+  readDaemonState,
+  removeDaemonStateIfCurrent,
+} from "./client.js";
 import { loadConfig } from "./config.js";
 import { runDaemon } from "./daemon/daemon.js";
 import { openDatabase } from "./db/db.js";
 import { createStores } from "./db/repos.js";
 import { createLogger } from "./logging.js";
 import { runMcpServer } from "./mcp/server.js";
-import { logFilePath, stateFilePath, wakewireHome } from "./paths.js";
+import { logFilePath, wakewireHome } from "./paths.js";
 import { refreshDesktopRegistration } from "./sinks/desktop-registration.js";
 import { VERSION } from "./version.js";
 
@@ -63,7 +68,11 @@ program
         process.exitCode = 1;
         return;
       }
-      fs.rmSync(stateFilePath(), { force: true });
+      if (!removeDaemonStateIfCurrent(existing)) {
+        console.error("daemon state changed during inspection; refusing to start another");
+        process.exitCode = 1;
+        return;
+      }
     }
     if (opts.detach) {
       const child = spawn(process.execPath, [cliPath, "start"], {
@@ -95,8 +104,12 @@ program
       return;
     }
     if (inspection.status !== "reachable") {
+      if (!removeDaemonStateIfCurrent(state)) {
+        console.error("daemon state changed during inspection; shutdown outcome is uncertain");
+        process.exitCode = 1;
+        return;
+      }
       console.log("daemon is not running");
-      fs.rmSync(stateFilePath(), { force: true });
       return;
     }
     const response = await apiFetch<{ ok?: boolean; error?: string }>("/api/shutdown", {

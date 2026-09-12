@@ -1,6 +1,8 @@
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
   type DesktopConnectorCandidate,
@@ -54,13 +56,17 @@ describe("selectDesktopConnector", () => {
 });
 
 describe("newestConnectorServers", () => {
-  it("uses only the newest installed connector version", () => {
-    expect(
-      newestConnectorServers(["C:\\cache\\0.1.3\\server.mjs", "C:\\cache\\0.1.4\\server.mjs"]),
-    ).toEqual(["C:\\cache\\0.1.4\\server.mjs"]);
-  });
+  it.each([
+    ["Windows", "C:\\cache\\0.1.3\\server.mjs", "C:\\cache\\0.1.4\\server.mjs"],
+    ["Linux and macOS", "/cache/0.1.3/server.mjs", "/cache/0.1.4/server.mjs"],
+  ])(
+    "uses only the newest installed connector version for %s paths",
+    (_platform, oldPath, newPath) => {
+      expect(newestConnectorServers([oldPath, newPath])).toEqual([newPath]);
+    },
+  );
 
-  it.each(["0.1", "0.1.4.2", "0.1.x", "01.2.3", "1e3.2.3", "9007199254740992.1.1"])(
+  it.each(["0.1", "0.1.4.2", "0.1.x", "01.2.3", "1e3.2.3", "9007199254740992.1.1", ""])(
     "rejects invalid connector version %s before sorting",
     (version) => {
       expect(() =>
@@ -74,6 +80,60 @@ describe("newestConnectorServers", () => {
 });
 
 describe("refreshDesktopRegistration", () => {
+  it("waits for a cross-process refresh before reading and replacing", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wakewire-registration-"));
+    const file = path.join(dir, "desktop-registration.json");
+    const lockFile = `${file}.refresh.lock`;
+    const locked = path.join(dir, "locked");
+    const release = path.join(dir, "release");
+    const script = path.join(dir, "holder.mts");
+    fs.writeFileSync(file, JSON.stringify(registration));
+    fs.writeFileSync(
+      script,
+      `import fs from "node:fs";
+import { withExclusiveFileLock } from ${JSON.stringify(pathToFileURL(path.resolve("src/exclusive-ownership.ts")).href)};
+const [file, lockFile, locked, release] = process.argv.slice(2);
+await withExclusiveFileLock(lockFile, async () => {
+  fs.writeFileSync(locked, "ready");
+  while (!fs.existsSync(release)) await new Promise((resolve) => setTimeout(resolve, 5));
+  const current = JSON.parse(fs.readFileSync(file, "utf8"));
+  fs.writeFileSync(file, JSON.stringify({ ...current, coordination: { newer: true } }));
+});
+`,
+    );
+    const tsx = path.resolve("node_modules/tsx/dist/cli.mjs");
+    const child = spawn(process.execPath, [tsx, script, file, lockFile, locked, release], {
+      stdio: "inherit",
+    });
+    const childExit = new Promise<void>((resolve, reject) => {
+      child.once("exit", (code) => (code === 0 ? resolve() : reject(new Error(`child ${code}`))));
+    });
+    let probeCount = 0;
+    try {
+      await vi.waitFor(() => expect(fs.existsSync(locked)).toBe(true));
+      const refresh = refreshDesktopRegistration(file, {
+        candidates: () => [first],
+        probe: async () => {
+          probeCount += 1;
+          return true;
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(probeCount).toBe(0);
+      fs.writeFileSync(release, "go");
+      await expect(refresh).resolves.toBe(true);
+      await childExit;
+      expect(JSON.parse(fs.readFileSync(file, "utf8"))).toMatchObject({
+        coordination: { newer: true },
+        serverPath: first.serverPath,
+      });
+    } finally {
+      fs.writeFileSync(release, "go");
+      child.kill();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("serializes overlapping refreshes for the same registration", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wakewire-registration-"));
     const file = path.join(dir, "desktop-registration.json");

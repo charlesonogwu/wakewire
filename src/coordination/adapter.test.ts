@@ -25,9 +25,9 @@ const config: CoordinationConfig = {
   trustedAuthorIds: { codex: ["101"], hermes: ["202"] },
   waitingLabel: "waiting:charles",
 };
-const cleanup: (() => void)[] = [];
-afterEach(() => {
-  for (const close of cleanup.splice(0).reverse()) close();
+const cleanup: (() => void | Promise<void>)[] = [];
+afterEach(async () => {
+  for (const close of cleanup.splice(0).reverse()) await close();
   vi.unstubAllEnvs();
 });
 function vote(
@@ -283,7 +283,9 @@ describe("fresh coordination through actual Desktop receipts", () => {
     const f = fixture();
     f.state.checks = "pending";
     const db = openDatabase(":memory:");
-    cleanup.push(() => db.close());
+    cleanup.push(() => {
+      db.close();
+    });
     const stores = createStores(db);
     const route = stores.routes.create({
       name: "ci-liveness",
@@ -389,7 +391,7 @@ describe("fresh coordination through actual Desktop receipts", () => {
   it("deduplicates separate webhook IDs and restart despite unrelated comments, label order, and old votes", async () => {
     const f = fixture();
     await f.adapter.deliverToThread("test-thread", "first", opts());
-    f.adapter.close();
+    await f.adapter.close();
     f.state.labels.reverse();
     f.state.comments.reverse();
     f.state.comments.push({ ...vote("codex", "approve", sha, 99), body: "ordinary trusted prose" });
@@ -516,7 +518,9 @@ describe("fresh coordination through actual Desktop receipts", () => {
   it("carries the persisted event through the real SQLite queue without digest coalescing", async () => {
     const f = fixture();
     const db = openDatabase(":memory:");
-    cleanup.push(() => db.close());
+    cleanup.push(() => {
+      db.close();
+    });
     const stores = createStores(db);
     const route = stores.routes.create({
       name: "coordination",
@@ -557,7 +561,9 @@ function statusEvent(deliveryId: string): WakeEvent {
 }
 function statusQueue(f: ReturnType<typeof fixture>) {
   const db = openDatabase(":memory:");
-  cleanup.push(() => db.close());
+  cleanup.push(() => {
+    db.close();
+  });
   const stores = createStores(db);
   const route = stores.routes.create({
     name: "status-ci",
@@ -739,7 +745,7 @@ describe("opt-in prepush through Desktop receipts", () => {
   it("deduplicates across restart, comment identity, timestamp and prose edits", async () => {
     const f = prepushFixture(true);
     await f.adapter.deliverToThread("test-thread", "wake", opts());
-    f.adapter.close();
+    await f.adapter.close();
     f.state.comments = [
       {
         ...request(99),
@@ -848,7 +854,9 @@ describe("private registration opt-in", () => {
     writeFileSync(file, JSON.stringify(registration));
     vi.stubEnv("WAKEWIRE_DESKTOP_REGISTRATION", file);
     const db = openDatabase(":memory:");
-    cleanup.push(() => db.close());
+    cleanup.push(() => {
+      db.close();
+    });
     const daemon = { ...loadConfig(createStores(db).settings), adapter: "codex-desktop" as const };
     const adapter = createAdapter(daemon, pino({ level: "silent" }));
     cleanup.push(() => adapter.close?.());

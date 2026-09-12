@@ -6,8 +6,8 @@ import { CodexDesktopAdapter, type DesktopToolClient } from "./codex-desktop.js"
 
 const dirs: string[] = [];
 const adapters: CodexDesktopAdapter[] = [];
-afterEach(() => {
-  for (const a of adapters.splice(0)) a.close();
+afterEach(async () => {
+  for (const a of adapters.splice(0)) await a.close();
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 function fixture(status = "idle", stateFile?: string) {
@@ -110,7 +110,7 @@ describe("Desktop owner delivery", () => {
     expect(await f.adapter.deliverToThread("test-thread", "hello", opts)).toEqual({
       threadId: "test-thread",
     });
-    f.adapter.close();
+    await f.adapter.close();
     const second = new CodexDesktopAdapter(f.config, f.client);
     adapters.push(second);
     await second.deliverToThread("test-thread", "hello", opts);
@@ -127,7 +127,7 @@ describe("Desktop owner delivery", () => {
     await expect(f.adapter.deliverToThread("test-thread", "hello", opts)).rejects.toThrow(
       /uncertain/i,
     );
-    f.adapter.close();
+    await f.adapter.close();
     const second = new CodexDesktopAdapter(f.config, f.client);
     adapters.push(second);
     await expect(second.deliverToThread("test-thread", "hello", opts)).rejects.toThrow(

@@ -6,6 +6,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { settingKeys } from "../config.js";
 import { openDatabase } from "../db/db.js";
 import { createStores } from "../db/repos.js";
+import { acquireExclusiveOwnership, releaseExclusiveOwnership } from "../exclusive-ownership.js";
 import { Daemon } from "./daemon.js";
 
 vi.mock("../sinks/factory.js", () => ({
@@ -55,6 +56,37 @@ it("allows only one daemon instance to own a wakewire home", async () => {
   daemons.push(second);
 
   await expect(second.start()).rejects.toThrow(/already owns|ownership/i);
+});
+
+it("does not delete a replacement installed after observing a stale owner", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "wakewire-owner-race-"));
+  homes.push(home);
+  const lockFile = path.join(home, "daemon.lock");
+  fs.writeFileSync(lockFile, JSON.stringify({ pid: 2_147_483_647, instanceId: "stale" }));
+  const replacement = { pid: process.pid, instanceId: "replacement" };
+  let replacementHandle: number | undefined;
+  const originalRead = fs.readFileSync.bind(fs);
+  let interleaved = false;
+  const read = vi.spyOn(fs, "readFileSync").mockImplementation((target, options) => {
+    const contents = originalRead(target, options as never);
+    if (path.resolve(String(target)) === path.resolve(lockFile) && !interleaved) {
+      interleaved = true;
+      replacementHandle = acquireExclusiveOwnership(lockFile, replacement);
+    }
+    return contents;
+  });
+
+  try {
+    expect(() =>
+      acquireExclusiveOwnership(lockFile, { pid: process.pid, instanceId: "late-starter" }),
+    ).toThrow(/already owns|ownership/i);
+    expect(JSON.parse(originalRead(lockFile, "utf8"))).toEqual(replacement);
+  } finally {
+    read.mockRestore();
+    if (replacementHandle !== undefined) {
+      releaseExclusiveOwnership(lockFile, replacementHandle, replacement);
+    }
+  }
 });
 
 it("shuts down only when the authenticated request names this instance", async () => {

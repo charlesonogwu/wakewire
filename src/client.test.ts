@@ -18,6 +18,7 @@ const homes: string[] = [];
 const originalHome = process.env.WAKEWIRE_HOME;
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   if (originalHome === undefined) delete process.env.WAKEWIRE_HOME;
   else process.env.WAKEWIRE_HOME = originalHome;
@@ -94,22 +95,62 @@ describe("apiFetch", () => {
 
     await expect(
       apiFetch("/api/routes", { method: "POST", body: { name: "one" } }),
-    ).rejects.toThrow(/response lost/i);
+    ).rejects.toMatchObject({ name: "DaemonRequestUncertainError" });
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds a stalled authenticated health response body", async () => {
+    vi.useFakeTimers();
+    installState();
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ service: "wakewire", instanceId: state.instanceId, pid: 1234 }),
+        ),
+      )
+      .mockImplementationOnce(async (_input, init) => stalledJsonResponse(init?.signal));
+    vi.stubGlobal("fetch", request);
+
+    const health = apiFetch("/api/health");
+    const assertion = expect(health).rejects.toThrow(/deadline|timed out/i);
+    await vi.runAllTimersAsync();
+
+    await assertion;
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports an uncertain outcome when a delivered mutation stalls while parsing", async () => {
+    vi.useFakeTimers();
+    installState();
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ service: "wakewire", instanceId: state.instanceId, pid: 1234 }),
+        ),
+      )
+      .mockImplementationOnce(async (_input, init) => stalledJsonResponse(init?.signal));
+    vi.stubGlobal("fetch", request);
+
+    const mutation = apiFetch("/api/routes", { method: "POST", body: { name: "one" } });
+    const assertion = expect(mutation).rejects.toMatchObject({
+      name: "DaemonRequestUncertainError",
+      message: expect.stringMatching(/outcome is uncertain|may have been applied/i),
+    });
+    await vi.runAllTimersAsync();
+
+    await assertion;
     expect(request).toHaveBeenCalledTimes(2);
   });
 });
 
 describe("inspectDaemonState", () => {
-  it("authenticates only after the public identity matches the saved instance", async () => {
+  it("checks lifecycle identity without waiting for authenticated deep health", async () => {
     const request = vi
       .fn<(input: string | URL | Request, init?: RequestInit) => Promise<Response>>()
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ service: "wakewire", instanceId: "instance-1", pid: 1234 }), {
-          status: 200,
-        }),
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ status: "ok", instanceId: "instance-1", pid: 1234 }), {
           status: 200,
         }),
       );
@@ -117,9 +158,8 @@ describe("inspectDaemonState", () => {
     await expect(inspectDaemonState(state, request, () => true)).resolves.toMatchObject({
       status: "reachable",
     });
-    expect(request).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenCalledTimes(1);
     expect(request.mock.calls[0]?.[1]?.headers).toBeUndefined();
-    expect(request.mock.calls[1]?.[1]?.headers).toEqual({ authorization: "Bearer test-token" });
     expect(request.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
   });
 
@@ -178,25 +218,6 @@ describe("inspectDaemonState", () => {
 
   it("keeps the identity deadline active while parsing the response body", async () => {
     const request = vi.fn<typeof fetch>(async (_input, init) => stalledJsonResponse(init?.signal));
-    const inspection = inspectDaemonState(state, request, () => true);
-
-    await expect(
-      Promise.race([
-        inspection,
-        new Promise((resolve) => setTimeout(() => resolve({ status: "stalled" }), 1_500)),
-      ]),
-    ).resolves.toMatchObject({ status: "uncertain" });
-  });
-
-  it("keeps the authenticated-health deadline active while parsing the response body", async () => {
-    const request = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({ service: "wakewire", instanceId: state.instanceId, pid: 1234 }),
-        ),
-      )
-      .mockImplementationOnce(async (_input, init) => stalledJsonResponse(init?.signal));
     const inspection = inspectDaemonState(state, request, () => true);
 
     await expect(

@@ -200,4 +200,97 @@ describe("RefreshingDesktopMcpClient", () => {
     expect(stale.call).toHaveBeenCalledTimes(1);
     expect(refresh).not.toHaveBeenCalled();
   });
+
+  it("fences retry and future calls when closed during refresh", async () => {
+    const refreshGate = deferred<boolean>();
+    const closeGate = deferred<void>();
+    const stale = client(vi.fn().mockRejectedValue(new Error("stale connector")));
+    vi.mocked(stale.close).mockReturnValue(closeGate.promise);
+    const replacement = client(vi.fn().mockResolvedValue({ content: [] }));
+    const subject = new RefreshingDesktopMcpClient("C:\\registration.json", {
+      refresh: vi.fn(() => refreshGate.promise),
+      readRegistration: vi.fn().mockReturnValue({ version: "current" }),
+      makeClient: vi.fn().mockReturnValueOnce(stale).mockReturnValueOnce(replacement),
+    });
+    const pendingRead = subject.call("read_thread", {
+      threadId: "thread-1",
+      hostId: "local",
+    });
+    const pendingAssertion = expect(pendingRead).rejects.toThrow(/closed/i);
+    await vi.waitFor(() => expect(stale.close).toHaveBeenCalledTimes(1));
+
+    const closing = subject.close();
+    let closeFinished = false;
+    void closing.then(() => {
+      closeFinished = true;
+    });
+    refreshGate.resolve(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(closeFinished).toBe(false);
+    closeGate.resolve();
+    await closing;
+
+    await pendingAssertion;
+    await expect(
+      subject.call("read_thread", { threadId: "thread-1", hostId: "local" }),
+    ).rejects.toThrow(/closed/i);
+    expect(stale.close).toHaveBeenCalledTimes(1);
+    expect(replacement.call).not.toHaveBeenCalled();
+    expect(replacement.close).not.toHaveBeenCalled();
+  });
+
+  it("joins a newer active refresh when an older generation fails late", async () => {
+    const lateFirstRead = deferred<unknown>();
+    const secondRefresh = deferred<boolean>();
+    const first = client(
+      vi
+        .fn<DesktopToolClient["call"]>()
+        .mockImplementationOnce(() => lateFirstRead.promise)
+        .mockRejectedValueOnce(new Error("generation one failed")),
+    );
+    const second = client(
+      vi
+        .fn<DesktopToolClient["call"]>()
+        .mockResolvedValueOnce({ content: [{ type: "text", text: "generation two" }] })
+        .mockRejectedValueOnce(new Error("generation two failed")),
+    );
+    const third = client(vi.fn().mockResolvedValue({ content: [] }));
+    const refresh = vi
+      .fn<() => Promise<boolean>>()
+      .mockResolvedValueOnce(true)
+      .mockImplementationOnce(() => secondRefresh.promise);
+    const makeClient = vi
+      .fn()
+      .mockReturnValueOnce(first)
+      .mockReturnValueOnce(second)
+      .mockReturnValueOnce(third);
+    const subject = new RefreshingDesktopMcpClient("C:\\registration.json", {
+      refresh,
+      readRegistration: vi.fn().mockReturnValue({ version: "current" }),
+      makeClient,
+    });
+
+    const oldRead = subject.call("read_thread", { threadId: "thread-1", hostId: "local" });
+    await expect(
+      subject.call("read_thread", { threadId: "thread-1", hostId: "local" }),
+    ).resolves.toEqual({ content: [{ type: "text", text: "generation two" }] });
+    const newerRead = subject.call("read_thread", { threadId: "thread-1", hostId: "local" });
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
+
+    lateFirstRead.reject(new Error("late generation one failure"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(makeClient).toHaveBeenCalledTimes(2);
+    secondRefresh.resolve(true);
+
+    await expect(Promise.all([oldRead, newerRead])).resolves.toEqual([
+      { content: [] },
+      { content: [] },
+    ]);
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(first.close).toHaveBeenCalledTimes(1);
+    expect(second.close).toHaveBeenCalledTimes(1);
+    expect(third.close).not.toHaveBeenCalled();
+    await subject.close();
+    expect(third.close).toHaveBeenCalledTimes(1);
+  });
 });

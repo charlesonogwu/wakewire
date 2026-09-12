@@ -22,6 +22,60 @@ afterEach(() => {
 });
 
 describe("daemon lifecycle commands", () => {
+  it.each([
+    ["start", ["start", "--detach"]],
+    ["stop", ["stop"]],
+  ])("%s does not remove state replaced during identity inspection", async (_name, command) => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "wakewire-cli-lifecycle-"));
+    homes.push(home);
+    const stateFile = path.join(home, "daemon.json");
+    const replacement = {
+      pid: process.pid,
+      port: 1,
+      token: "replacement-token",
+      instanceId: "replacement",
+      startedAt: "2026-09-12T00:00:01.000Z",
+      version: "0.1.0",
+    };
+    const server = http.createServer((_request, response) => {
+      fs.writeFileSync(stateFile, JSON.stringify(replacement));
+      fs.writeFileSync(
+        path.join(home, "daemon.lock"),
+        JSON.stringify({ pid: process.pid, instanceId: replacement.instanceId }),
+      );
+      response.setHeader("content-type", "application/json");
+      response.end(
+        JSON.stringify({ service: "wakewire", instanceId: "foreign", pid: process.pid }),
+      );
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server did not listen");
+    fs.writeFileSync(
+      stateFile,
+      JSON.stringify({
+        ...replacement,
+        port: address.port,
+        token: "old-token",
+        instanceId: "inspected",
+        startedAt: "2026-09-12T00:00:00.000Z",
+      }),
+    );
+
+    try {
+      const tsx = path.resolve("node_modules/tsx/dist/cli.mjs");
+      await expect(
+        execFileAsync(process.execPath, [tsx, "src/cli.ts", ...command], {
+          cwd: path.resolve("."),
+          env: { ...process.env, WAKEWIRE_HOME: home },
+        }),
+      ).rejects.toMatchObject({ code: 1 });
+      expect(JSON.parse(fs.readFileSync(stateFile, "utf8"))).toEqual(replacement);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it("stop never terminates an unrelated process that reused a stale daemon pid", async () => {
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
       stdio: "ignore",
@@ -130,7 +184,9 @@ describe("daemon lifecycle commands", () => {
     }
   });
 
-  it("stop keeps its authenticated-health deadline active through a stalled response body", async () => {
+  it("stop bounds a stalled management response without probing deep health", async () => {
+    let healthRequests = 0;
+    let shutdownRequests = 0;
     const server = http.createServer((request, response) => {
       if (request.url === "/api/identity") {
         response.writeHead(200, { "content-type": "application/json" });
@@ -139,8 +195,13 @@ describe("daemon lifecycle commands", () => {
         );
         return;
       }
+      if (request.url === "/api/health") {
+        healthRequests += 1;
+      } else if (request.url === "/api/shutdown") {
+        shutdownRequests += 1;
+      }
       response.writeHead(200, { "content-type": "application/json" });
-      response.write('{"status":"ok"');
+      response.write('{"ok":true');
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
@@ -169,8 +230,10 @@ describe("daemon lifecycle commands", () => {
         }),
       ).rejects.toMatchObject({
         code: 1,
-        stderr: expect.stringContaining("cannot verify daemon identity"),
+        stderr: expect.stringContaining("outcome is uncertain"),
       });
+      expect(healthRequests).toBe(0);
+      expect(shutdownRequests).toBe(1);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
@@ -183,6 +246,7 @@ describe("daemon lifecycle commands", () => {
     if (!child.pid) throw new Error("test process did not start");
     children.push(child.pid);
     let shutdownBody: unknown;
+    let healthRequests = 0;
     const server = http.createServer((request, response) => {
       if (request.url === "/api/identity") {
         response.setHeader("content-type", "application/json");
@@ -192,6 +256,7 @@ describe("daemon lifecycle commands", () => {
         return;
       }
       if (request.url === "/api/health") {
+        healthRequests += 1;
         response.setHeader("content-type", "application/json");
         response.end(JSON.stringify({ status: "ok", instanceId: "instance-1", pid: child.pid }));
         return;
@@ -238,6 +303,7 @@ describe("daemon lifecycle commands", () => {
         }),
       ).resolves.toMatchObject({ stdout: expect.stringContaining("shutdown requested") });
       expect(shutdownBody).toEqual({ instanceId: "instance-1" });
+      expect(healthRequests).toBe(0);
       expect(() => process.kill(child.pid as number, 0)).not.toThrow();
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
