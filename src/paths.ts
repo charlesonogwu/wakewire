@@ -15,6 +15,10 @@ export function stateFilePath(): string {
   return path.join(wakewireHome(), "daemon.json");
 }
 
+export function daemonLockFilePath(): string {
+  return path.join(wakewireHome(), "daemon.lock");
+}
+
 export function logsDir(): string {
   return path.join(wakewireHome(), "logs");
 }
