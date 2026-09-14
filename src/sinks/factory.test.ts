@@ -89,6 +89,8 @@ function fixture() {
   const config: DaemonConfig = {
     adapter: "codex-desktop",
     codexPath: undefined,
+    musePath: undefined,
+    museYolo: false,
     model: undefined,
     appServerConnection: "auto",
     appServerListen: undefined,

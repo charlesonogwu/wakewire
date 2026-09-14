@@ -7,12 +7,15 @@ export const AdapterNameSchema = z.enum([
   "codex-app-server",
   "codex-exec",
   "codex-desktop",
+  "muse-exec",
 ]);
 export type AdapterName = z.infer<typeof AdapterNameSchema>;
 
 export interface DaemonConfig {
   adapter: AdapterName;
   codexPath: string | undefined;
+  musePath: string | undefined;
+  museYolo: boolean;
   model: string | undefined;
   appServerConnection: "auto" | "proxy" | "spawn";
   /** Loopback ws:// URL for shared-server mode (codex --remote TUIs attach to it). */
@@ -26,6 +29,8 @@ export interface DaemonConfig {
 export const settingKeys = {
   adapter: "sink.adapter",
   codexPath: "sink.codexPath",
+  musePath: "sink.musePath",
+  museYolo: "sink.museYolo",
   model: "sink.model",
   appServerConnection: "sink.appServerConnection",
   appServerListen: "sink.appServerListen",
@@ -47,6 +52,8 @@ export function loadConfig(settings: SettingsStore): DaemonConfig {
   return {
     adapter,
     codexPath: settings.get(settingKeys.codexPath) ?? undefined,
+    musePath: settings.get(settingKeys.musePath) ?? undefined,
+    museYolo: settings.get(settingKeys.museYolo) === "1",
     model: settings.get(settingKeys.model) ?? undefined,
     appServerConnection: connection,
     appServerListen: settings.get(settingKeys.appServerListen) ?? undefined,

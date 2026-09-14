@@ -9,6 +9,7 @@ import { CodexDesktopAdapter } from "./codex-desktop.js";
 import { CodexExecAdapter } from "./codex-exec.js";
 import { CodexSdkAdapter } from "./codex-sdk.js";
 import { RefreshingDesktopMcpClient } from "./desktop-refreshing-client.js";
+import { MuseExecAdapter } from "./muse-exec.js";
 import type { AgentAdapter } from "./types.js";
 
 export function createAdapter(config: DaemonConfig, logger: Logger): AgentAdapter {
@@ -49,6 +50,11 @@ export function createAdapter(config: DaemonConfig, logger: Logger): AgentAdapte
       return new CodexExecAdapter(logger, {
         codexPath: config.codexPath,
         model: config.model,
+      });
+    case "muse-exec":
+      return new MuseExecAdapter(logger, {
+        musePath: config.musePath,
+        yolo: config.museYolo,
       });
     default:
       return new CodexSdkAdapter(logger, {

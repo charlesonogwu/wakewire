@@ -153,6 +153,14 @@ WakeWire talks to Codex through an adapter (config: settings key `sink.adapter`)
   `wakewire config set sink.adapter codex-sdk` (then restart the daemon).
 - **`codex-exec`** — plain `codex exec` shell-out against your installed codex;
   maximum-compatibility last resort.
+- **`muse-exec`** — headless `muse exec` shell-out against your installed Muse
+  Code CLI: `wakewire config set sink.adapter muse-exec` (then restart the
+  daemon). WakeWire thread ids map 1:1 onto Muse session ids; prompts go via
+  `--prompt-file`, turns are capped with `--max-model-steps`, and by default
+  runs *without* `--yolo` so credentialed/destructive turns pause instead of
+  acting. Opt in with `wakewire config set sink.museYolo 1`. Override the
+  binary with `wakewire config set sink.musePath <path>` when `muse` isn't
+  on PATH.
 
 Honest caveats: cross-client thread attachment is not officially documented by
 OpenAI; with the default SDK adapter, an open thread in the desktop app won't
@@ -176,7 +184,7 @@ rather than compete.
 No cloud/hosted component, no web dashboard, no writing to Codex's internal
 databases, no Gmail Pub/Sub (IMAP IDLE only; the source interface accommodates a
 Pub/Sub adapter later), no Claude Code sink yet (the `AgentAdapter` interface is
-the seam where one would go).
+the seam where one would go; `muse-exec` is its first non-Codex implementation).
 
 ## Windows
 
