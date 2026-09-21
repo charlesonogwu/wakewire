@@ -151,6 +151,36 @@ describe("Desktop owner delivery", () => {
     ]);
     expect(f.sent).toHaveLength(1);
   });
+  it("does not submit two different messages after overlapping idle reads", async () => {
+    const f = fixture();
+    const real = f.client.call.bind(f.client);
+    let release!: () => void;
+    let entered!: () => void;
+    const firstRead = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let readCount = 0;
+    f.client.call = async (name, args) => {
+      if (name === "read_thread" && ++readCount === 1) {
+        entered();
+        await hold;
+      }
+      return real(name, args);
+    };
+    const first = f.adapter.deliverToThread("test-thread", "first", opts);
+    await firstRead;
+    const second = f.adapter.deliverToThread("test-thread", "second", {
+      ...opts,
+      deliveryId: "event-two",
+    });
+    release();
+    const outcomes = await Promise.allSettled([first, second]);
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    expect(f.sent).toHaveLength(1);
+  });
   it("rejects a mismatched workspace before submission", async () => {
     const f = fixture();
     f.config.cwd = path.join(f.config.cwd, "different");

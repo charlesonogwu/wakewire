@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import Database from "better-sqlite3";
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../config.js";
@@ -400,6 +401,18 @@ describe("fresh coordination through actual Desktop receipts", () => {
     f.state.body += "\nUnrelated description change";
     await f.make().deliverToThread("test-thread", "different rendered text", opts("second"));
     expect(f.sent).toHaveLength(1);
+  });
+  it("delivers one fix wake across the review-comment and label-change event burst", async () => {
+    const f = fixture();
+    f.state.labels = ["agent:codex", "review:hermes"];
+    f.state.comments = [vote("hermes", "revise")];
+    await f.adapter.deliverToThread("test-thread", "comment", opts("comment"));
+    f.state.labels = ["agent:codex"];
+    await f.adapter.deliverToThread("test-thread", "old label removed", opts("unlabel"));
+    f.state.labels = ["agent:codex", "changes-requested:codex"];
+    await f.adapter.deliverToThread("test-thread", "new label added", opts("label"));
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]?.prompt).toContain("Action: fix");
   });
   it("ignores edits to superseded same-SHA reviews but delivers later changed trusted decisions", async () => {
     const f = fixture();
@@ -861,6 +874,15 @@ describe("private registration opt-in", () => {
     const adapter = createAdapter(daemon, pino({ level: "silent" }));
     cleanup.push(() => adapter.close?.());
     expect(adapter instanceof CoordinationAdapter).toBe(enabled);
+    const inspect = new Database(f.desktopConfig.stateFile, { readonly: true });
+    try {
+      const table = inspect
+        .prepare("SELECT name FROM sqlite_master WHERE name='coordination_jobs'")
+        .get();
+      expect(Boolean(table)).toBe(enabled);
+    } finally {
+      inspect.close();
+    }
   });
   it.each([
     { ...config, localAgent: "hermes" },

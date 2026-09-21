@@ -53,6 +53,7 @@ export class CodexDesktopAdapter implements AgentAdapter {
   readonly supportsCoalescing = false;
   readonly supportsNewThreads = false;
   private readonly db: Database.Database;
+  private sending = false;
   constructor(
     private readonly config: DesktopConfig,
     private readonly client: DesktopToolClient,
@@ -74,6 +75,15 @@ export class CodexDesktopAdapter implements AgentAdapter {
     );
   }
   async deliverToThread(threadId: string, prompt: string, opts: DeliveryOptions) {
+    if (this.sending) throw new BusyError("Another Desktop wake is in flight");
+    this.sending = true;
+    try {
+      return await this.deliverOwned(threadId, prompt, opts);
+    } finally {
+      this.sending = false;
+    }
+  }
+  private async deliverOwned(threadId: string, prompt: string, opts: DeliveryOptions) {
     if (
       threadId !== this.config.threadId ||
       opts.sandbox !== "workspace-write" ||

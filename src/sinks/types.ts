@@ -1,3 +1,4 @@
+import type { CompletionJobStatus } from "../coordination/completion.js";
 import type { WakeEvent } from "../core/event.js";
 import type { SandboxPolicy } from "../core/route.js";
 
@@ -32,6 +33,8 @@ export interface AgentAdapter {
   startThread(prompt: string, opts: DeliveryOptions): Promise<DeliveryResult>;
   /** Cheap reachability check — used to decide held-vs-failed and for status reporting. */
   probe(): Promise<boolean>;
+  /** Sanitized metadata; never exposes prompts or task identifiers. */
+  coordinationJobs?(): CompletionJobStatus[];
   /** Release connections/child processes on daemon shutdown. */
   close?(): void | Promise<void>;
 }

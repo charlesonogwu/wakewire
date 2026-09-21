@@ -138,6 +138,10 @@ export function createApi(ctx: ApiContext): Hono {
     return c.json({ deliveries });
   });
 
+  app.get("/api/coordination/jobs", (c) =>
+    c.json({ jobs: ctx.adapter.coordinationJobs?.() ?? [] }),
+  );
+
   app.post("/api/deliveries/:id/replay", (c) => {
     try {
       const delivery = ctx.queue.replay(c.req.param("id"));

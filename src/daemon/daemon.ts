@@ -197,11 +197,8 @@ export class Daemon {
 
   private async stopOwned(): Promise<void> {
     this.logger.info("daemon shutting down");
-    this.queue?.stop();
+    await this.queue?.stop();
     await this.sources?.stopAll();
-    // Kills adapter connections AND any shared app-server child it owns —
-    // otherwise the hard exit below orphans the spawned server.
-    await this.adapter?.close?.();
     await new Promise<void>((resolve) => {
       if (!this.ingressServer) return resolve();
       this.ingressServer.close(() => resolve());
@@ -210,6 +207,8 @@ export class Daemon {
       if (!this.server) return resolve();
       this.server.close(() => resolve());
     });
+    // Drain API users before closing the adapter and its completion database.
+    await this.adapter?.close?.();
     this.db?.close();
     try {
       const state = JSON.parse(fs.readFileSync(stateFilePath(), "utf8")) as DaemonState;

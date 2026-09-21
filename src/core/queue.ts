@@ -38,6 +38,8 @@ export class DeliveryQueue {
   private readonly inFlight = new Set<string>();
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
+  private activeTick: Promise<void> | undefined;
+  private stopped = false;
 
   constructor(
     private readonly stores: Stores,
@@ -54,6 +56,7 @@ export class DeliveryQueue {
 
   start(): void {
     if (this.timer) return;
+    this.stopped = false;
     const recovered = this.stores.deliveries.resetInFlight();
     if (recovered > 0) {
       this.logger.warn({ recovered }, "reset stale in-flight deliveries to queued");
@@ -63,11 +66,13 @@ export class DeliveryQueue {
     void this.tick();
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
+    this.stopped = true;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
+    await this.activeTick;
   }
 
   /** Render the prompt for a matched event and persist it as a queued delivery. */
@@ -123,7 +128,20 @@ export class DeliveryQueue {
   }
 
   /** One scheduler pass. Public for deterministic tests. */
-  async tick(): Promise<void> {
+  tick(): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    if (this.activeTick) return Promise.resolve();
+    const work = this.tickOwned();
+    this.activeTick = work;
+    void work
+      .finally(() => {
+        this.activeTick = undefined;
+      })
+      .catch(() => {});
+    return work;
+  }
+
+  private async tickOwned(): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
     try {

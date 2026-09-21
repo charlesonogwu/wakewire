@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { z } from "zod";
 import type { DaemonConfig } from "../config.js";
 import { CoordinationAdapter, CoordinationConfigSchema } from "../coordination/adapter.js";
+import { CoordinationCompletionMonitor } from "../coordination/completion.js";
 import { GithubSnapshotClient } from "../coordination/github.js";
 import type { Logger } from "../logging.js";
 import { CodexAppServerAdapter } from "./codex-app-server.js";
@@ -31,13 +32,22 @@ export function createAdapter(config: DaemonConfig, logger: Logger): AgentAdapte
         .strict()
         .parse(JSON.parse(readFileSync(file, "utf8")));
       const desktop = new CodexDesktopAdapter(registration, new RefreshingDesktopMcpClient(file));
-      return registration.coordination
-        ? new CoordinationAdapter(
-            registration.coordination,
-            new GithubSnapshotClient(registration.coordination.expectedRepository),
-            desktop,
-          )
-        : desktop;
+      if (!registration.coordination) return desktop;
+      const snapshots = new GithubSnapshotClient(registration.coordination.expectedRepository);
+      const completion = new CoordinationCompletionMonitor({
+        dbFile: registration.stateFile,
+        config: registration.coordination,
+        snapshots,
+        inner: desktop,
+      });
+      const adapter = new CoordinationAdapter(
+        registration.coordination,
+        snapshots,
+        desktop,
+        completion,
+      );
+      completion.start();
+      return adapter;
     }
     case "codex-app-server":
       return new CodexAppServerAdapter(logger, {
