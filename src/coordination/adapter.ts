@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { type AgentAdapter, type DeliveryOptions, PermanentError } from "../sinks/types.js";
+import { type CoordinationCompletionMonitor, latestTrustedVote } from "./completion.js";
 import { type GithubSnapshotClient, RepositorySchema } from "./github.js";
 import {
   type Agent,
@@ -102,6 +103,7 @@ export class CoordinationAdapter implements AgentAdapter {
     config: CoordinationConfig,
     private readonly snapshots: GithubSnapshotClient,
     private readonly inner: AgentAdapter,
+    private readonly completion?: CoordinationCompletionMonitor,
   ) {
     this.config = CoordinationConfigSchema.parse(config);
   }
@@ -186,7 +188,25 @@ export class CoordinationAdapter implements AgentAdapter {
       .replaceAll(">", "\\u003e")
       .replaceAll("&", "\\u0026");
     const prompt = `${instructions}\n\nAction: ${decision.action}\nReason: ${decision.reason}\nBEGIN UNTRUSTED SNAPSHOT DATA\n${data}\nEND UNTRUSTED SNAPSHOT DATA`;
-    return this.inner.deliverToThread(threadId, prompt, { ...opts, deliveryId });
+    const jobId =
+      this.completion &&
+      (decision.action === "fix" || decision.action === "review" || decision.action === "verify") &&
+      decision.headSha
+        ? this.completion.register({
+            repository: this.config.expectedRepository,
+            number,
+            headSha: decision.headSha,
+            action: decision.action,
+            threadId,
+            firstPrompt: prompt,
+            firstDeliveryId: deliveryId,
+            baselineVote: latestTrustedVote(snapshot, this.config)?.ordering ?? null,
+          })
+        : undefined;
+    if (jobId && !this.completion?.mayDeliver(jobId, deliveryId)) return { threadId };
+    const delivered = await this.inner.deliverToThread(threadId, prompt, { ...opts, deliveryId });
+    if (jobId) this.completion?.acknowledge(jobId, deliveryId);
+    return delivered;
   }
   async startThread(_prompt: string, _opts: DeliveryOptions): Promise<never> {
     throw new PermanentError("Coordination only supports the registered existing task");
@@ -194,8 +214,12 @@ export class CoordinationAdapter implements AgentAdapter {
   probe() {
     return this.inner.probe();
   }
-  close() {
-    return this.inner.close?.();
+  coordinationJobs() {
+    return this.completion?.list() ?? [];
+  }
+  async close() {
+    await this.completion?.close();
+    await this.inner.close?.();
   }
 }
 

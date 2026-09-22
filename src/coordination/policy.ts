@@ -31,7 +31,7 @@ export interface CoordinationResult {
   owner: Agent | null;
 }
 const agents = ["codex", "hermes"] as const;
-const impacts = new Set(["website", "pi", "supabase", "elevenlabs", "cloudflare"]);
+const impacts = new Set(["website", "pi", "supabase", "elevenlabs", "cloudflare", "apps-script"]);
 const validSha = (value: string | null): value is string =>
   typeof value === "string" && /^[0-9a-f]{40}$/.test(value);
 const isAgent = (value: string | undefined): value is Agent =>
