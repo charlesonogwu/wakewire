@@ -77,6 +77,18 @@ describe("pure dual-review policy", () => {
       ).action,
     ).toBe("ready");
   });
+  it("accepts an Apps Script handoff with current approvals", () => {
+    const input = snapshot({
+      body: "<!-- agent-handoff:v1\norigin: codex\nowner: codex\nreviewer: hermes\nimpacts: apps-script\n-->",
+      labels: ["agent:codex", "approved:hermes", "waiting:peer", "impact:apps-script"],
+      comments: approvals(),
+    });
+    expect(evaluateCoordination(input, config)).toMatchObject({
+      action: "ready",
+      owner: "codex",
+      headSha: sha,
+    });
+  });
   it("blocks conflicting agent and legacy owner labels despite both approvals", () => {
     expect(
       evaluateCoordination(
