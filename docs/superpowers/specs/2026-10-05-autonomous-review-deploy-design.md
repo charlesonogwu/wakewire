@@ -62,9 +62,10 @@ repository lanes. Each lane has its own:
 - repository adapter and deployment history.
 
 The lanes may share the coordinator process and execution scheduler, but they
-must never share task context, worktrees, credentials, or artifacts. Review jobs
-may run concurrently when resources permit. Production deployment activation is
-serialized globally.
+must never share task context, worktrees, credentials, or artifacts. Each lane
+has distinct long-lived author and reviewer T3 contexts; one context cannot cast
+both verdicts. Review jobs may run concurrently when resources permit.
+Production deployment activation is serialized globally.
 
 ### Runtime host
 
@@ -101,7 +102,15 @@ current GitHub plan. Therefore the practical boundary is:
 3. expose only narrow broker operations for branch publication, comments, and
    status records;
 4. reject deployment for direct pushes or merges without a current merge-ready
-   record.
+   record;
+5. check the configured operator identity on the merge event, while documenting
+   that a shared GitHub account cannot cryptographically distinguish a human UI
+   click from an API call made with that same account.
+
+The last limitation is handled operationally: agent sandboxes and brokers never
+receive the account's generic token or any merge operation. The operator keeps
+the interactive GitHub session. If separate GitHub identities become available,
+the same actor check becomes enforceable at the account boundary.
 
 The GitHub merge event is deployment authorization. No Telegram message, issue
 comment, label, model output, or WakeWire event can substitute for it.
@@ -115,8 +124,9 @@ edit the author's branch. Neither role may merge or deploy.
 ### Deployment authority
 
 The runtime executor accepts only a coordinator-signed deployment request tied to
-an actual merged PR, the verified merge SHA, and a registered repository adapter.
-The executor cannot select arbitrary paths or commands from PR text.
+an actual merged PR, the verified merge SHA, a signed artifact manifest, and a
+previously activated repository adapter. The executor cannot select arbitrary
+paths or commands from PR text and never downloads release contents from GitHub.
 
 ## Work identity
 
@@ -142,8 +152,9 @@ classifies it as authorized and repairable. Duplicate reports correlate to the
 existing job. Login walls, rate limits, quiet periods, ambiguous requests, and
 operational outages may be recorded without starting code work.
 
-A PR event creates or resumes its linked job. Draft or ambiguous PRs remain
-waiting. Webhook duplicates are idempotent.
+A PR event creates or resumes its linked job. A draft PR may be inspected,
+challenged, and tested, but cannot become merge-ready until it is marked ready
+for review. Ambiguous PRs remain waiting. Webhook duplicates are idempotent.
 
 ### 2. Author evidence
 
@@ -185,9 +196,15 @@ The loop ends in one of three durable states:
 Timeouts, exhausted model budgets, unavailable machines, and unknown outcomes
 never become approvals.
 
+Author and reviewer are separate T3 contexts mapped by repository policy. A
+business-facing Telegram Hermes may hold the reviewer role while its bounded
+source inspection and test tools execute on the review host. A coordinator model
+cannot impersonate both roles or manufacture the second verdict.
+
 ### 5. Plain-English readiness summary
 
-For a merge-ready candidate, WakeWire publishes one operator-facing summary with:
+For a merge-ready or not-worth-merging candidate, WakeWire publishes one
+operator-facing summary with:
 
 - what changes and the expected outcome;
 - why the change is needed;
@@ -199,31 +216,40 @@ For a merge-ready candidate, WakeWire publishes one operator-facing summary with
 - anything intentionally unchanged.
 
 The summary names the repository, PR, head SHA, base SHA, and candidate tree. A
-new revision supersedes the summary automatically.
+new revision supersedes the summary automatically. A blocked job publishes a
+durable reason and next required evidence so it cannot look like work is still
+silently running.
 
 ### 6. Merge validation
 
 On merge, the coordinator reads fresh GitHub state and verifies:
 
 - the PR has a current merge-ready record;
-- the merged head equals the reviewed head;
+- the PR head that GitHub merged equals the reviewed head;
 - the tested base/candidate relationship remains valid;
 - required hosted checks succeeded;
-- the actual merge tree matches the tested candidate policy;
+- the actual merge commit tree exactly matches the tested candidate tree;
 - the merge is not a direct push or unrelated commit;
 - no newer release for the same repository has already been activated.
 
 If the merge method produces a different tree than the tested candidate, the
-deployment stops and collaboration resumes. The merged code remains in GitHub;
-robots do not revert the default branch.
+deployment stops, fences that release, opens a linked repair job, and sends one
+operator notice. The merged code remains in GitHub; robots do not revert the
+default branch. The same response applies when any post-merge authorization
+check fails.
 
 ### 7. Automatic deployment
 
 A validated merge durably creates a deployment intent before changing runtime
-state. The coordinator and runtime executor use one Pi-wide lock with a fencing
-token. Only one activation or rollback may run at a time.
+state. Busy and idle checks run before taking the global activation lock. A
+pending deployment does not prevent the other repository from becoming idle or
+preparing its artifact. Immediately before activation, the executor takes one
+Pi-wide lock with a fencing token, rechecks release ordering, and acquires the
+adapter-defined admission lease that prevents a new affected business job from
+starting. Only one activation or rollback may run at a time.
 
-The registered repository adapter supplies a trusted, versioned definition of:
+The previously activated repository adapter supplies a trusted, versioned
+definition of:
 
 - deployable file manifest or artifact builder;
 - fixed runtime target;
@@ -235,12 +261,22 @@ The registered repository adapter supplies a trusted, versioned definition of:
 - compatibility and irreversible-change declarations.
 
 The PR cannot rewrite its own production target or weaken shared executor safety
-rules. Adapter changes require separate review and explicit adapter-policy tests.
+rules. An adapter change requires separate review, explicit adapter-policy tests,
+and its own operator-merged adapter-policy PR; that Merge is its activation
+authorization. It cannot govern an application merge in the same release that
+introduces it.
 
-The executor stages the immutable artifact, verifies hashes and target identity,
-backs up the prior manifest, activates atomically where possible, and performs
-bounded verification. Documentation-only merges may produce a verified
-`nothing-to-deploy` receipt.
+The review host builds the immutable artifact from the actual merge SHA, signs a
+manifest containing every file hash and compatibility declaration, and sends the
+artifact directly to the runtime executor. The executor verifies the signature,
+hashes, adapter version, target identity, architecture, runtime versions, and
+release ordering before activation. Dependencies are either already declared
+compatible or included as target-compatible artifacts; deployment never performs
+an unbounded dependency installation on the runtime host.
+
+The executor backs up the prior manifest, activates atomically where possible,
+and performs bounded verification. Documentation-only merges may produce a
+verified `nothing-to-deploy` receipt.
 
 ### 8. Receipt or recovery
 
@@ -256,11 +292,23 @@ On failure:
 4. retain the global lock if runtime state is uncertain;
 5. create a linked repair issue/PR and wake the correct repository lane with
    sanitized evidence;
-6. notify the operator once with the deployed/rolled-back/uncertain outcome.
+6. pause that repository's release queue so the same bad manifest cannot be
+   reintroduced;
+7. notify the operator once with the deployed/rolled-back/uncertain outcome.
 
 The failed merged PR cannot be reopened on GitHub. Recovery occurs through a new,
 linked repair job. No second deployment approval is needed for a safe rollback.
-A future corrected release still requires the operator to merge its PR.
+A future corrected release still requires the operator to merge its PR. A paused
+repository resumes only for a release explicitly linked as the repair, after its
+normal review and merge. An uncertain runtime state fences all activation until a
+bounded operator recovery command verifies the installed manifest and clears the
+fence; clearing the fence does not approve or redeploy the failed release.
+
+Releases with an irreversible or rollback-unsafe state transition cannot become
+merge-ready until their adapter records a separately reviewed recovery procedure
+and compatibility proof. If rollback is unsafe after activation begins, the
+executor fences the runtime and reports the required operator recovery instead
+of attempting a destructive guess.
 
 ## Durable state
 
@@ -280,6 +328,11 @@ The coordinator persists, per repository:
 Records are written before external mutations. After restart, the coordinator
 re-reads GitHub and runtime state before continuing. Unknown delivery or deploy
 outcomes are reconciled, never blindly repeated.
+
+The coordinator periodically reconciles merged PRs and current release records so
+a missed webhook cannot lose a deployment. The runtime executor keeps a durable
+receipt outbox and resends unacknowledged receipts idempotently after connectivity
+returns.
 
 ## Shared WakeWire responsibilities
 
@@ -326,7 +379,8 @@ or reference the other's adapter.
 - Tests run with bounded CPU, memory, time, output, process count, and network.
 - Repository reviews may run concurrently; runtime activation is serialized.
 - Runtime deployment waits while the affected business service is busy. Waiting
-  does not require a second approval and is not reported as failure.
+  happens outside the global activation lock, does not require a second approval,
+  and is not reported as failure.
 - A deployment for one repository must not restart or modify the other
   repository's services.
 
@@ -360,11 +414,19 @@ The implementation is not complete until automated or controlled tests prove:
 - direct pushes do not deploy;
 - merge-tree mismatch does not deploy;
 - one-click merge creates exactly one deployment intent;
+- a missed merge webhook is recovered by reconciliation exactly once;
+- a lost deployment acknowledgment is recovered from the receipt outbox;
 - cross-repository deployments serialize with fencing;
 - busy/offline runtime remains pending without losing authorization;
 - partial activation rolls back the exact previous manifest;
 - restart reconciliation does not duplicate deployment;
 - rollback uncertainty fences later deployments;
+- a verified operator recovery can clear a fence without approving the failed
+  release;
+- a failed release cannot be reintroduced except through its linked reviewed
+  repair release;
+- the runtime rejects unsigned, wrong-architecture, wrong-runtime, and
+  same-merge adapter updates;
 - documentation-only merge returns `nothing-to-deploy`;
 - one repository cannot access or restart the other's runtime;
 - operator summaries are concise, accurate, and invalidated by new revisions.
