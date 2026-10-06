@@ -82,6 +82,7 @@ export interface LaneRecord {
 export interface EngineeringOwnerRecord {
   repositoryId: string;
   owner: "legacy" | "omarchy";
+  phase: "stable" | "draining";
   generation: number;
   deploymentActivationEnabled: boolean;
   updatedAt: string;
@@ -89,7 +90,7 @@ export interface EngineeringOwnerRecord {
 }
 ```
 
-Both legacy and Omarchy coordinators read the same signed owner record before admitting engineering work. A local cache may only reduce reads; a stale generation cannot authorize work. Ownership rollback and disabling Omarchy activation are one compare-and-swap transition, not two machine-local changes.
+Both legacy and Omarchy coordinators read the same signed owner record before admitting engineering work. A local cache may only reduce reads; a stale generation cannot authorize work. During `draining`, neither owner may start new engineering work, while the current owner's already-running jobs retain their leases until completion. Ownership rollback and disabling Omarchy activation are one drain-and-compare-and-swap transition, not two machine-local changes.
 
 - [ ] **Step 4: Run focused verification**
 
@@ -253,7 +254,7 @@ Test changed bytes after signing, wrong repository, wrong architecture/runtime, 
 
 - [ ] **Step 2: Prove red**
 
-Run: `npx vitest run src/deploy/artifact.test.ts src/deploy/adapter.test.ts`
+Run: `npx vitest run src/deploy/artifact.test.ts src/deploy/adapter.test.ts src/deploy/genesis.test.ts`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement canonical manifests and Ed25519 signing**
@@ -272,11 +273,11 @@ export interface ArtifactEnvelope {
 }
 ```
 
-The initial adapter trust root is a one-time operator-signed record stored outside the executor and bound to repository ID, adapter digest/version, and owner generation. The executor may verify and consume that record exactly once; it cannot create, edit, or replace it. Every later adapter must be activated by a separate, already-trusted release.
+The initial adapter trust root is a one-time operator-signed record stored outside the executor and bound to repository ID, adapter digest/version, and the *target* owner generation of the planned cutover. The owner compare-and-swap verifies and consumes that record in the same transaction that creates that generation; it is never accepted against the prior `legacy` generation. The executor may verify and consume the record exactly once; it cannot create, edit, or replace it. Every later adapter must be activated by a separate, already-trusted release.
 
 - [ ] **Step 4: Verify**
 
-Run: `npx vitest run src/deploy/artifact.test.ts src/deploy/adapter.test.ts && npm run typecheck`
+Run: `npx vitest run src/deploy/artifact.test.ts src/deploy/adapter.test.ts src/deploy/genesis.test.ts && npm run typecheck`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -303,7 +304,7 @@ git commit -m "feat: sign immutable release artifacts"
 
 - [ ] **Step 1: Write migration and crash-recovery tests**
 
-Cover intent-before-mutation, process death during activation, lost acknowledgment, stale fencing token, repository pause, global uncertainty, linked repair release, `refuse` writing a pause without an intent, rejection of every direct fence-clear attempt, stale owner generation, and atomic owner rollback plus activation disable.
+Cover intent-before-mutation, process death during activation, lost acknowledgment, stale fencing token, repository pause, global uncertainty, linked repair release, `refuse` writing a pause without an intent, rejection of every direct fence-clear attempt, stale owner generation, target-generation genesis consumption, forward and reverse drain barriers, active transaction blocking ownership change, and uncertainty fence blocking rollback.
 
 - [ ] **Step 2: Prove red**
 
@@ -312,7 +313,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Add append-only migration and transactional stores**
 
-Store candidate IDs, merge/tree hashes, phases, tokens, previous/current manifests, receipt acknowledgment, and pause/fence reasons. Never edit prior migrations. Task 6 has no fence-clearing API: recovery in Task 7 is the only path that may clear a fence after proving the observed runtime manifest matches the journal.
+Store candidate IDs, merge/tree hashes, phases, tokens, previous/current manifests, receipt acknowledgment, pause/fence reasons, and owner-transition drain state. Never edit prior migrations. An ownership transition first writes `draining`, stops new admissions, waits for active jobs and deployment transactions to finish, then commits the new stable owner generation. Reverse cutover uses the same barrier and cannot bypass an active transaction or uncertainty fence. Task 6 has no fence-clearing API: recovery in Task 7 is the only path that may clear a fence after proving the observed runtime manifest matches the journal.
 
 - [ ] **Step 4: Verify**
 
@@ -380,11 +381,11 @@ git commit -m "feat: execute fenced automatic deployments"
 
 - [ ] **Step 1: Write failing CLI safety tests**
 
-Test default dry-run, no merge command, no arbitrary repo/path/command parameters, redacted status, explicit recovery token, refusal to clear an unverified fence, one-time genesis consumption, stale owner generation, and proof that no live merge scan or activation occurs while `deploymentActivationEnabled` is false.
+Test default dry-run, no merge command, no arbitrary repo/path/command parameters, redacted status, explicit recovery token, refusal to clear an unverified fence, one-time genesis consumption, stale owner generation, drain-state refusal, and proof that no live merge scan or activation occurs while `deploymentActivationEnabled` is false.
 
 - [ ] **Step 2: Prove red**
 
-Run: `npx vitest run src/deploy/cli.test.ts`
+Run: `npx vitest run src/deploy/cli.test.ts src/deploy/service.test.ts`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement dry-run and documented cutover surfaces**
