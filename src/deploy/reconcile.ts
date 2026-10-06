@@ -47,6 +47,7 @@ function decide(merge: FreshMerge): MergeDecision {
     repairId: `repair-${merge.deliveryId}`,
     notice,
     deliveryId: merge.deliveryId,
+    ...(merge.eventId ? { eventId: merge.eventId } : {}),
   });
   if (merge.kind !== "pull_request_merged" || merge.pr === null)
     return refuse("direct push is not a reviewed merge");

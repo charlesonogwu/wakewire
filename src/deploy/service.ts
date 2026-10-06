@@ -27,6 +27,7 @@ export interface DeploymentServiceDeps {
     "publicKey" | "journal" | "intentId" | "token" | "receiptId" | "replay"
   >;
   nextToken?: () => number;
+  deliverReceipt?: (receiptId: string) => boolean;
 }
 
 export interface DeploymentService {
@@ -55,6 +56,11 @@ export function createDeploymentService(deps: DeploymentServiceDeps): Deployment
       }
       let decisions = 0;
       let executions = 0;
+      if (deps.deliverReceipt) {
+        for (const receiptId of deps.journal.pendingReceipts()) {
+          if (deps.deliverReceipt(receiptId)) deps.journal.acknowledge(receiptId);
+        }
+      }
       const run = (decision: Extract<MergeDecision, { kind: "intent" }>, intentId: string) => {
         const built = deps.artifactFor?.(decision);
         const result = deps.execute(
@@ -78,9 +84,24 @@ export function createDeploymentService(deps: DeploymentServiceDeps): Deployment
         ) {
           deps.journal.markSettled(intentId, result.status);
         }
+        if (
+          (result.status === "deployed" || result.status === "nothing-to-deploy") &&
+          decision.repairId
+        ) {
+          const pause = deps.journal.pause(decision.repositoryId);
+          if (pause?.repairId === decision.repairId) {
+            deps.journal.clearPause(decision.repositoryId, pause.repairId);
+          }
+        }
         executions += 1;
       };
       for (const decision of scan(deps.freshMerges(repositoryId))) {
+        if (
+          decision.eventId &&
+          deps.journal.disposition(repositoryId, decision.eventId) === "bootstrap-consumed"
+        ) {
+          continue;
+        }
         if (decision.kind === "intent") {
           const existingId = deps.journal.intentId(decision.deliveryId);
           const existing = existingId ? deps.journal.intentRecord(existingId) : null;

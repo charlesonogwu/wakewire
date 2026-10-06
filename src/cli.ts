@@ -268,37 +268,32 @@ program
   .option("--repository <id>", "fenced repository id")
   .option("--intent <id>", "fenced intent id")
   .option("--token <token>", "fenced lock token")
-  .option("--manifest <hash>", "observed runtime manifest hash")
-  .action(
-    (
-      action: string,
-      options: { repository?: string; intent?: string; token?: string; manifest?: string },
-    ) => {
-      const argv = [action];
-      if (options.repository) argv.push("--repository", options.repository);
-      if (options.intent) argv.push("--intent", options.intent);
-      if (options.token) argv.push("--token", options.token);
-      if (options.manifest) argv.push("--manifest", options.manifest);
-      const db = action === "dry-run" ? null : openDatabase();
-      try {
-        const result = dispatchDeploy(argv, {
-          dryRun: () => runDryRun(),
-          recover: (evidence) => {
-            if (!db) throw new Error("recovery requires the local journal");
-            return recoverObserved(db, evidence);
-          },
-          status: () => (db ? readDeployStatus(db) : { repositories: [] }),
-        });
-        console.log(
-          action === "status"
-            ? renderStatus(result as { repositories: StatusRepository[] })
-            : JSON.stringify(result),
-        );
-      } finally {
-        db?.close();
-      }
-    },
-  );
+  .action((action: string, options: { repository?: string; intent?: string; token?: string }) => {
+    const argv = [action];
+    if (options.repository) argv.push("--repository", options.repository);
+    if (options.intent) argv.push("--intent", options.intent);
+    if (options.token) argv.push("--token", options.token);
+    const db = action === "dry-run" ? null : openDatabase();
+    try {
+      const result = dispatchDeploy(argv, {
+        dryRun: () => runDryRun(),
+        recover: (evidence) => {
+          if (!db) throw new Error("recovery requires the local journal");
+          return recoverObserved(db, evidence, () => {
+            throw new Error("trusted runtime observer is not configured");
+          });
+        },
+        status: () => (db ? readDeployStatus(db) : { repositories: [] }),
+      });
+      console.log(
+        action === "status"
+          ? renderStatus(result as { repositories: StatusRepository[] })
+          : JSON.stringify(result),
+      );
+    } finally {
+      db?.close();
+    }
+  });
 
 program.parseAsync().catch((err) => {
   console.error(err instanceof Error ? err.message : err);

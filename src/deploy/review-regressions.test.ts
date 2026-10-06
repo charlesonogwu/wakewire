@@ -5,11 +5,12 @@ import path from "node:path";
 import DatabaseConstructor from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { migrate } from "../db/migrations.js";
+import type { RuntimeAdapter } from "./adapter.js";
 import { buildArtifactEnvelope, verifyArtifactEnvelope } from "./artifact.js";
 import { createBroker, createGuardedTransport } from "./broker.js";
 import { advanceCandidate, blankCandidate } from "./candidate.js";
 import { canonicalJson } from "./crypto.js";
-import { executeRelease } from "./executor.js";
+import { executeRelease, type RuntimeCallbacks } from "./executor.js";
 import type { GenesisAdapterRecord } from "./genesis.js";
 import { type DeployJournal, openDeployJournal } from "./journal.js";
 import { createLaneRouter } from "./lanes.js";
@@ -50,12 +51,52 @@ function journal(): { db: DatabaseConstructor.Database; store: DeployJournal } {
   return { db, store };
 }
 
+function activatedAdapter(repositoryId: string): RuntimeAdapter {
+  return {
+    version: "1",
+    repositoryId,
+    allow: ["src/", "docs/"],
+    deny: [".env", "secrets/"],
+    runtimeTargetId: "runtime-a",
+    busyCheckId: "busy-a",
+    verifyCheckId: "verify-a",
+    reloadId: "reload-a",
+    rollback: "files",
+    architecture: "x64",
+    runtimeVersions: { node: "20" },
+  };
+}
+
+function cb(overrides: Partial<RuntimeCallbacks> = {}): RuntimeCallbacks {
+  return {
+    runtimeTargetId: "runtime-a",
+    busyCheckId: "busy-a",
+    verifyCheckId: "verify-a",
+    reloadId: "reload-a",
+    busy: () => false,
+    lease: () => ({ release() {} }),
+    idle: () => true,
+    orderingOk: () => true,
+    write: () => undefined,
+    restore: () => undefined,
+    previous: () => new Map(),
+    reload: () => undefined,
+    verify: () => true,
+    verifyRestore: () => true,
+    deliverReceipt: () => true,
+    observe: () => "",
+    ...overrides,
+  };
+}
+
 function cutover(store: DeployJournal, repositoryId = "repo-a") {
+  store.pinTrust("pinned-key", publicKey);
   store.beginDrain(repositoryId, 1);
+  const digest = store.pinAdapter(activatedAdapter(repositoryId));
   const genesis: GenesisAdapterRecord = signed({
     repositoryId,
     adapterVersion: "1",
-    adapterDigest: "d".repeat(64),
+    adapterDigest: digest,
     mergeSha: SHA_A,
     treeHash: SHA_B,
     mergeEventId: `adapter-${repositoryId}`,
@@ -73,7 +114,6 @@ function cutover(store: DeployJournal, repositoryId = "repo-a") {
       updatedAt: "2026-10-06T00:00:00.000Z",
     }),
     genesis,
-    publicKey,
     rollback: false,
     keyId: "pinned-key",
   });
@@ -121,7 +161,7 @@ describe("review regressions", () => {
         adapterDigest: "e".repeat(64),
         adapterPolicy: { allow: ["src/"], deny: [] },
         adapterRollback: "files",
-        callbacks: {
+        callbacks: cb({
           busy: () => false,
           lease: () => ({ release() {} }),
           idle: () => true,
@@ -131,7 +171,7 @@ describe("review regressions", () => {
           },
           restore: () => undefined,
           previous: () => new Map(),
-        },
+        }),
         token: 1,
         receiptId: "r1",
         replay: false,
@@ -149,7 +189,7 @@ describe("review regressions", () => {
         adapterDigest: "d".repeat(64),
         adapterPolicy: { allow: ["src/"], deny: [] },
         adapterRollback: "files",
-        callbacks: {
+        callbacks: cb({
           busy: () => false,
           lease: () => ({ release() {} }),
           idle: () => true,
@@ -159,7 +199,7 @@ describe("review regressions", () => {
           },
           restore: () => undefined,
           previous: () => new Map(),
-        },
+        }),
         token: 2,
         receiptId: "r2",
         replay: false,
@@ -185,30 +225,40 @@ describe("review regressions", () => {
     store.recordManifest("intent-d1", "manifest-a");
     expect(store.tryAcquire(4, { repositoryId: "repo-a", intentId: "intent-d1" })).toBe("acquired");
     store.retain(4, "uncertain");
+    const observe = () => "manifest-a";
     expect(
-      recover(db, {
-        repositoryId: "repo-b",
-        intentId: "intent-d1",
-        token: 4,
-        observedManifest: "manifest-a",
-      }),
+      recover(
+        db,
+        {
+          repositoryId: "repo-b",
+          intentId: "intent-d1",
+          token: 4,
+        },
+        observe,
+      ),
     ).toBe("fenced");
     expect(store.tryAcquire(5)).toBe("fenced");
     expect(
-      recover(db, {
-        repositoryId: "repo-a",
-        intentId: "intent-d1",
-        token: 3,
-        observedManifest: "manifest-a",
-      }),
+      recover(
+        db,
+        {
+          repositoryId: "repo-a",
+          intentId: "intent-d1",
+          token: 3,
+        },
+        observe,
+      ),
     ).toBe("fenced");
     expect(
-      recover(db, {
-        repositoryId: "repo-a",
-        intentId: "intent-d1",
-        token: 4,
-        observedManifest: "manifest-a",
-      }),
+      recover(
+        db,
+        {
+          repositoryId: "repo-a",
+          intentId: "intent-d1",
+          token: 4,
+        },
+        observe,
+      ),
     ).toBe("cleared");
     expect(store.intentId("recovery-must-not-create")).toBeNull();
   });
@@ -231,12 +281,15 @@ describe("review regressions", () => {
     store.recordManifest("intent-d1", "manifest-a");
     expect(store.tryAcquire(2, { repositoryId: "repo-a", intentId: "intent-d1" })).toBe("acquired");
     expect(
-      recover(db, {
-        repositoryId: "repo-a",
-        intentId: "intent-d1",
-        token: 2,
-        observedManifest: "manifest-a",
-      }),
+      recover(
+        db,
+        {
+          repositoryId: "repo-a",
+          intentId: "intent-d1",
+          token: 2,
+        },
+        () => "manifest-a",
+      ),
     ).toBe("fenced");
     expect(store.tryAcquire(3)).toBe("busy");
   });
@@ -254,6 +307,7 @@ describe("review regressions", () => {
       }),
       "pinned-key",
     );
+    store.pinTrust("pinned-key", publicKey);
     store.beginDrain("repo-b", 1);
     const genesis = signed({
       repositoryId: "repo-b",
@@ -278,7 +332,6 @@ describe("review regressions", () => {
         expectedGeneration: 1,
         next: { ...next, signature: "invalid" },
         genesis,
-        publicKey,
         rollback: false,
         keyId: "pinned-key",
       }),
@@ -290,7 +343,6 @@ describe("review regressions", () => {
         expectedGeneration: 1,
         next,
         genesis,
-        publicKey,
         rollback: false,
         keyId: "other-key",
       }),
@@ -324,6 +376,7 @@ describe("review regressions", () => {
       updatedAt: "2026-10-06T00:00:00.000Z",
     });
     const { store } = journal();
+    cutover(store);
     store.acquireLease({
       id: "deploy-1",
       repositoryId: "repo-a",
@@ -509,7 +562,7 @@ describe("review regressions", () => {
       adapterDigest: "d".repeat(64),
       adapterPolicy: { allow: ["src/"], deny: ["secrets/"] },
       adapterRollback: "files",
-      callbacks: {
+      callbacks: cb({
         busy: () => false,
         lease: () => ({ release() {} }),
         idle: () => true,
@@ -523,7 +576,7 @@ describe("review regressions", () => {
           throw new Error("crash before receipt");
         },
         observe: () => store.intentRecord("intent-d1")?.targetManifest ?? "",
-      },
+      }),
       token: 7,
       receiptId: "r-crash",
       replay: false,
@@ -574,7 +627,7 @@ describe("review regressions", () => {
       adapterDigest: "d".repeat(64),
       adapterPolicy: { allow: ["src/"], deny: [] },
       adapterRollback: "files",
-      callbacks: {
+      callbacks: cb({
         busy: () => false,
         lease: () => ({ release() {} }),
         idle: () => true,
@@ -586,7 +639,7 @@ describe("review regressions", () => {
         verifyRestore: () => true,
         previous: () => new Map(),
         deliverReceipt: () => true,
-      },
+      }),
       token: 8,
       receiptId: "r-roll",
       replay: false,
@@ -617,7 +670,7 @@ describe("review regressions", () => {
       adapterDigest: "d".repeat(64),
       adapterPolicy: { allow: ["src/"], deny: [] },
       adapterRollback: "files",
-      callbacks: {
+      callbacks: cb({
         busy: () => false,
         lease: () => ({ release() {} }),
         idle: () => true,
@@ -627,7 +680,7 @@ describe("review regressions", () => {
         },
         restore: () => undefined,
         previous: () => new Map(),
-      },
+      }),
       token: 9,
       receiptId: "r-blocked",
       replay: false,
@@ -675,7 +728,7 @@ describe("review regressions", () => {
       adapterDigest: "d".repeat(64),
       adapterPolicy: { allow: ["src/"], deny: [] },
       adapterRollback: "files",
-      callbacks: {
+      callbacks: cb({
         busy: () => false,
         lease: () => ({ release() {} }),
         idle: () => true,
@@ -686,7 +739,7 @@ describe("review regressions", () => {
         reload: () => undefined,
         verify: () => true,
         deliverReceipt: () => false,
-      },
+      }),
       token: 10,
       receiptId: "r-undelivered",
       replay: false,
@@ -702,11 +755,15 @@ describe("review regressions", () => {
         return { ok: true };
       },
     });
-    const broker = createBroker(transport, {
-      owner: "example",
-      name: "one",
-      branches: ["review/lane-a"],
-    });
+    const broker = createBroker(
+      transport,
+      {
+        owner: "example",
+        name: "one",
+        branches: ["review/lane-a"],
+      },
+      "author",
+    );
     await expect(
       broker.publishBranch({
         owner: "example",
@@ -725,13 +782,22 @@ describe("review regressions", () => {
         role: "author",
       }),
     ).rejects.toThrow(/branch/);
+    const reviewerBroker = createBroker(
+      transport,
+      {
+        owner: "example",
+        name: "one",
+        branches: ["review/lane-a"],
+      },
+      "reviewer",
+    );
     await expect(
-      broker.publishBranch({
+      reviewerBroker.publishBranch({
         owner: "example",
         name: "one",
         branch: "review/lane-a",
         sha: SHA_A,
-        role: "reviewer",
+        role: "author",
       }),
     ).rejects.toThrow(/author/);
     const lane: LaneRecord = {

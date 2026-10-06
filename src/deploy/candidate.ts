@@ -1,4 +1,4 @@
-import type { Candidate, CandidateId, CandidateStateName, Verdict } from "./types.js";
+import type { Candidate, CandidateId, Verdict } from "./types.js";
 
 export type CandidateEvent =
   | { type: "evidence" }
@@ -70,9 +70,14 @@ function block(candidate: Candidate, reason: string): Candidate {
 
 function promote(candidate: Candidate): Candidate {
   if (!canReady(candidate)) {
-    const state: CandidateStateName =
-      candidate.state === "triage" ? "challenging" : candidate.state;
-    return { ...candidate, state: state === "invalidated" ? "challenging" : state };
+    if (
+      candidate.state === "triage" ||
+      candidate.state === "invalidated" ||
+      candidate.state === "merge-ready"
+    ) {
+      return { ...candidate, state: "challenging" };
+    }
+    return candidate;
   }
   return { ...candidate, state: "merge-ready", blockReason: null };
 }

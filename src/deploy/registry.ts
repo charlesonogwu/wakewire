@@ -59,6 +59,15 @@ function canonicalRoot(root: string): string {
   if (/^[A-Za-z]:[\\/]/.test(root) || root.startsWith("\\\\") || root.startsWith("//")) {
     throw new Error(`windows absolute root ${root}`);
   }
+  let stat: fs.Stats | undefined;
+  try {
+    stat = fs.lstatSync(root);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") throw error;
+  }
+  if (stat?.isSymbolicLink()) throw new Error(`symlink lane root ${root}`);
+  if (stat) return fs.realpathSync(root);
   const normalized = path.posix.normalize(root.replaceAll("\\", "/"));
   return path.resolve(normalized);
 }

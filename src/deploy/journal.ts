@@ -1,6 +1,7 @@
-import type { KeyObject } from "node:crypto";
+import { createPublicKey, type KeyObject } from "node:crypto";
 import type { Database } from "better-sqlite3";
-import { verifySignature } from "./crypto.js";
+import { adapterDigest, parseRuntimeAdapter, type RuntimeAdapter } from "./adapter.js";
+import { canonicalJson, verifySignature } from "./crypto.js";
 import {
   tryAcquire as acquireFence,
   type FenceResult,
@@ -24,9 +25,8 @@ export interface OwnerChange {
   expectedGeneration: number;
   next: EngineeringOwnerRecord;
   genesis: GenesisAdapterRecord | null;
-  publicKey: KeyObject;
   rollback: boolean;
-  keyId?: string;
+  keyId: string;
 }
 
 export interface IntentRecord {
@@ -45,6 +45,17 @@ export interface FenceScope {
   intentId: string;
 }
 
+export interface IssuedWake {
+  requestId: string;
+  repositoryId: string;
+  laneId: string;
+  role: "author" | "reviewer";
+  pr: number;
+  headSha: string;
+  baseSha: string;
+  treeHash: string;
+}
+
 export interface DeployJournal {
   intake(receipt: RawReceipt): void;
   applyDecision(decision: MergeDecision): void;
@@ -55,6 +66,14 @@ export interface DeployJournal {
   prepareActivation(intentId: string, previousManifest: string, targetManifest: string): void;
   markSettled(intentId: string, phase: string): void;
   pauseForRepair(repositoryId: string, repairId: string, notice: string): void;
+  clearPause(repositoryId: string, repairId: string): void;
+  savePreviousFiles(intentId: string, files: ReadonlyMap<string, Buffer>): void;
+  previousFiles(intentId: string): Map<string, Buffer>;
+  pinTrust(keyId: string, publicKey: KeyObject): void;
+  pinAdapter(adapter: RuntimeAdapter): string;
+  activatedAdapter(repositoryId: string): (RuntimeAdapter & { digest: string }) | null;
+  issueWake(wake: IssuedWake): void;
+  issuedWake(requestId: string): IssuedWake | null;
   phases(intentId: string): string[];
   enqueueReceipt(id: string, intentId: string | null, kind: string): void;
   acknowledge(receiptId: string): void;
@@ -109,13 +128,20 @@ export function openDeployJournal(db: Database): DeployJournal {
     applyDecision(decision) {
       const run = db.transaction(() => {
         const eventId = decision.eventId ?? decision.deliveryId;
+        const existing = db
+          .prepare(
+            "SELECT disposition FROM deploy_dispositions WHERE repository_id = ? AND event_id = ?",
+          )
+          .get(decision.repositoryId, eventId) as { disposition: string } | undefined;
+        if (existing?.disposition === "bootstrap-consumed") return;
         if (decision.kind === "refuse") {
           db.prepare(
             "INSERT OR REPLACE INTO deploy_pauses (repository_id, repair_id, notice) VALUES (?, ?, ?)",
           ).run(decision.repositoryId, decision.repairId, decision.notice);
           db.prepare(
             `INSERT INTO deploy_dispositions (repository_id, event_id, disposition) VALUES (?, ?, 'refused')
-             ON CONFLICT(repository_id, event_id) DO UPDATE SET disposition = excluded.disposition`,
+             ON CONFLICT(repository_id, event_id) DO UPDATE SET disposition = excluded.disposition
+             WHERE deploy_dispositions.disposition != 'bootstrap-consumed'`,
           ).run(decision.repositoryId, eventId);
           return;
         }
@@ -137,7 +163,8 @@ export function openDeployJournal(db: Database): DeployJournal {
         ).run(id, new Date().toISOString());
         db.prepare(
           `INSERT INTO deploy_dispositions (repository_id, event_id, disposition) VALUES (?, ?, 'intent')
-           ON CONFLICT(repository_id, event_id) DO UPDATE SET disposition = excluded.disposition`,
+           ON CONFLICT(repository_id, event_id) DO UPDATE SET disposition = excluded.disposition
+           WHERE deploy_dispositions.disposition != 'bootstrap-consumed'`,
         ).run(decision.repositoryId, eventId);
       });
       run();
@@ -207,6 +234,123 @@ export function openDeployJournal(db: Database): DeployJournal {
       db.prepare(
         "INSERT OR REPLACE INTO deploy_pauses (repository_id, repair_id, notice) VALUES (?, ?, ?)",
       ).run(repositoryId, repairId, notice);
+    },
+    clearPause(repositoryId, repairId) {
+      db.prepare("DELETE FROM deploy_pauses WHERE repository_id = ? AND repair_id = ?").run(
+        repositoryId,
+        repairId,
+      );
+    },
+    savePreviousFiles(intentId, files) {
+      const insert = db.prepare(
+        "INSERT OR REPLACE INTO deploy_previous_files (intent_id, path, bytes) VALUES (?, ?, ?)",
+      );
+      for (const [filePath, bytes] of files) insert.run(intentId, filePath, bytes);
+    },
+    previousFiles(intentId) {
+      const rows = db
+        .prepare("SELECT path, bytes FROM deploy_previous_files WHERE intent_id = ? ORDER BY path")
+        .all(intentId) as Array<{ path: string; bytes: Buffer }>;
+      return new Map(rows.map((row) => [row.path, Buffer.from(row.bytes)]));
+    },
+    pinTrust(keyId, publicKey) {
+      const pem = publicKey.export({ type: "spki", format: "pem" }).toString();
+      const existing = db
+        .prepare("SELECT public_pem FROM deploy_trust_keys WHERE key_id = ?")
+        .get(keyId) as { public_pem: string } | undefined;
+      if (existing) {
+        if (existing.public_pem !== pem) throw new Error("trust key is immutable");
+        return;
+      }
+      db.prepare("INSERT INTO deploy_trust_keys (key_id, public_pem) VALUES (?, ?)").run(
+        keyId,
+        pem,
+      );
+    },
+    pinAdapter(adapter) {
+      const parsed = parseRuntimeAdapter(adapter);
+      const digest = adapterDigest(parsed);
+      const body = canonicalJson(parsed);
+      const existing = db
+        .prepare("SELECT body FROM deploy_adapters WHERE digest = ?")
+        .get(digest) as { body: string } | undefined;
+      if (existing) {
+        if (existing.body !== body) throw new Error("adapter digest collision");
+        return digest;
+      }
+      db.prepare(
+        "INSERT INTO deploy_adapters (digest, version, repository_id, body) VALUES (?, ?, ?, ?)",
+      ).run(digest, parsed.version, parsed.repositoryId, body);
+      return digest;
+    },
+    activatedAdapter(repositoryId) {
+      const consumed = db
+        .prepare(
+          `SELECT adapter_digest, adapter_version FROM deploy_genesis WHERE repository_id = ?`,
+        )
+        .get(repositoryId) as
+        | { adapter_digest: string | null; adapter_version: string | null }
+        | undefined;
+      if (!consumed?.adapter_digest || !consumed.adapter_version) return null;
+      const row = db
+        .prepare(
+          "SELECT body FROM deploy_adapters WHERE digest = ? AND version = ? AND repository_id = ?",
+        )
+        .get(consumed.adapter_digest, consumed.adapter_version, repositoryId) as
+        | { body: string }
+        | undefined;
+      if (!row) throw new Error("adapter digest is not the active adapter");
+      const parsed = parseRuntimeAdapter(JSON.parse(row.body) as unknown);
+      if (adapterDigest(parsed) !== consumed.adapter_digest) {
+        throw new Error("adapter digest is not the active adapter");
+      }
+      return { ...parsed, digest: consumed.adapter_digest };
+    },
+    issueWake(wake) {
+      db.prepare(
+        `INSERT INTO deploy_wakes
+         (request_id, repository_id, lane_id, role, pr, head_sha, base_sha, tree_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        wake.requestId,
+        wake.repositoryId,
+        wake.laneId,
+        wake.role,
+        wake.pr,
+        wake.headSha,
+        wake.baseSha,
+        wake.treeHash,
+      );
+    },
+    issuedWake(requestId) {
+      const row = db
+        .prepare(
+          `SELECT request_id, repository_id, lane_id, role, pr, head_sha, base_sha, tree_hash
+           FROM deploy_wakes WHERE request_id = ?`,
+        )
+        .get(requestId) as
+        | {
+            request_id: string;
+            repository_id: string;
+            lane_id: string;
+            role: "author" | "reviewer";
+            pr: number;
+            head_sha: string;
+            base_sha: string;
+            tree_hash: string;
+          }
+        | undefined;
+      if (!row) return null;
+      return {
+        requestId: row.request_id,
+        repositoryId: row.repository_id,
+        laneId: row.lane_id,
+        role: row.role,
+        pr: row.pr,
+        headSha: row.head_sha,
+        baseSha: row.base_sha,
+        treeHash: row.tree_hash,
+      };
     },
     beginActivation(intentId) {
       const row = db.prepare("SELECT id FROM deploy_intents WHERE id = ?").get(intentId);
@@ -287,12 +431,34 @@ export function openDeployJournal(db: Database): DeployJournal {
       );
     },
     acquireLease(lease) {
-      db.prepare(
-        "INSERT INTO deploy_leases (id, repository_id, generation, kind, released) VALUES (?, ?, ?, ?, 0)",
-      ).run(lease.id, lease.repositoryId, lease.generation, lease.kind);
+      const run = db.transaction(() => {
+        const owner = readOwner(db, lease.repositoryId);
+        if (!owner || owner.generation !== lease.generation)
+          throw new Error("stale owner generation");
+        if (owner.phase !== "stable") throw new Error("draining: new deployment lease is refused");
+        const column = lease.kind === "deployment" ? "active_deploys" : "active_jobs";
+        db.prepare(
+          `UPDATE deploy_owners SET ${column} = ${column} + 1 WHERE repository_id = ?`,
+        ).run(lease.repositoryId);
+        db.prepare(
+          "INSERT INTO deploy_leases (id, repository_id, generation, kind, released) VALUES (?, ?, ?, ?, 0)",
+        ).run(lease.id, lease.repositoryId, lease.generation, lease.kind);
+      });
+      run();
     },
     releaseLease(id) {
-      db.prepare("UPDATE deploy_leases SET released = 1 WHERE id = ?").run(id);
+      const run = db.transaction(() => {
+        const row = db
+          .prepare("SELECT repository_id, kind, released FROM deploy_leases WHERE id = ?")
+          .get(id) as { repository_id: string; kind: string; released: number } | undefined;
+        if (!row || row.released === 1) return;
+        const column = row.kind === "deployment" ? "active_deploys" : "active_jobs";
+        db.prepare(
+          `UPDATE deploy_owners SET ${column} = CASE WHEN ${column} > 0 THEN ${column} - 1 ELSE 0 END WHERE repository_id = ?`,
+        ).run(row.repository_id);
+        db.prepare("UPDATE deploy_leases SET released = 1 WHERE id = ?").run(id);
+      });
+      run();
     },
     activeDeploymentLease(repositoryId) {
       const row = db
@@ -327,12 +493,13 @@ export function openDeployJournal(db: Database): DeployJournal {
         }
         if (change.rollback && readFence(db).fenced)
           throw new Error("uncertainty fence blocking rollback");
-        const { signature, ...body } = change.next;
-        if (!verifySignature(body, signature, change.publicKey))
-          throw new Error("owner signature is invalid");
         if (owner.pinned_key_id && change.keyId !== owner.pinned_key_id) {
           throw new Error("pinned key mismatch");
         }
+        const trustKey = resolveTrustKey(db, change.keyId);
+        const { signature, ...body } = change.next;
+        if (!verifySignature(body, signature, trustKey))
+          throw new Error("owner signature is invalid");
         if (change.genesis) {
           if (change.genesis.targetGeneration !== change.next.generation) {
             throw new Error("genesis target generation mismatch");
@@ -345,7 +512,7 @@ export function openDeployJournal(db: Database): DeployJournal {
           }>;
           verifyGenesisAdapterRecord(
             change.genesis,
-            change.publicKey,
+            trustKey,
             new Set(consumed.map((row) => row.merge_event_id)),
             change.repositoryId,
           );
@@ -478,6 +645,14 @@ interface OwnerRow {
   signature: string;
   updated_at: string;
   pinned_key_id: string | null;
+}
+
+function resolveTrustKey(db: Database, keyId: string): KeyObject {
+  const row = db.prepare("SELECT public_pem FROM deploy_trust_keys WHERE key_id = ?").get(keyId) as
+    | { public_pem: string }
+    | undefined;
+  if (!row) throw new Error("trust key is not pinned");
+  return createPublicKey(row.public_pem);
 }
 
 function readOwner(db: Database, repositoryId: string): OwnerRow | undefined {

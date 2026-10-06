@@ -31,6 +31,7 @@ function database() {
     deploymentActivationEnabled: false,
     updatedAt: "2026-10-06T00:00:00.000Z",
   });
+  journal.pinTrust("pinned-key", publicKey);
   journal.seedOwner(initial);
   return { db, journal };
 }
@@ -123,7 +124,7 @@ describe("DeploymentService", () => {
       expectedGeneration: 1,
       next: enabledOwner(),
       genesis: genesis(),
-      publicKey,
+      keyId: "pinned-key",
       rollback: false,
     });
     expect(() =>
@@ -132,7 +133,7 @@ describe("DeploymentService", () => {
         expectedGeneration: 2,
         next: enabledOwner(),
         genesis: genesis(),
-        publicKey,
+        keyId: "pinned-key",
         rollback: false,
       }),
     ).toThrow(/reused genesis|draining/);
@@ -163,7 +164,7 @@ describe("DeploymentService", () => {
       expectedGeneration: 1,
       next: enabledOwner(),
       genesis: genesis(),
-      publicKey,
+      keyId: "pinned-key",
       rollback: false,
     });
     service.intake(
@@ -200,7 +201,7 @@ describe("DeploymentService", () => {
         expectedGeneration: 99,
         next: enabledOwner(),
         genesis: genesis(),
-        publicKey,
+        keyId: "pinned-key",
         rollback: false,
       }),
     ).toThrow(/generation/);
@@ -209,7 +210,7 @@ describe("DeploymentService", () => {
       expectedGeneration: 1,
       next: enabledOwner(),
       genesis: genesis(),
-      publicKey,
+      keyId: "pinned-key",
       rollback: false,
     });
     journal.beginDrain("repo-a", 2);
@@ -229,7 +230,7 @@ describe("DeploymentService", () => {
       expectedGeneration: 2,
       next: enabledOwner(),
       genesis: null,
-      publicKey,
+      keyId: "pinned-key",
       rollback: false,
     });
     expect(wrongHost.tick("repo-a")).toEqual({ decisions: 0, executions: 0 });

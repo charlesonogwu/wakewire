@@ -2,6 +2,7 @@ import { generateKeyPairSync, sign } from "node:crypto";
 import DatabaseConstructor from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { migrate } from "../db/migrations.js";
+import type { RuntimeAdapter } from "./adapter.js";
 import { buildArtifactEnvelope } from "./artifact.js";
 import { canonicalJson } from "./crypto.js";
 import { executeRelease, type RuntimeCallbacks } from "./executor.js";
@@ -18,7 +19,26 @@ function signed<T extends object>(body: T): T & { signature: string } {
   };
 }
 
-function readyJournal() {
+function runtimeAdapter(
+  repositoryId: string,
+  rollback: "files" | "unsafe" = "files",
+): RuntimeAdapter {
+  return {
+    version: "1",
+    repositoryId,
+    allow: ["src/", "docs/"],
+    deny: [".env"],
+    runtimeTargetId: "runtime-a",
+    busyCheckId: "busy-a",
+    verifyCheckId: "verify-a",
+    reloadId: "reload-a",
+    rollback,
+    architecture: "x64",
+    runtimeVersions: { python: "3.11" },
+  };
+}
+
+function readyJournal(rollback: "files" | "unsafe" = "files") {
   const db = new DatabaseConstructor(":memory:");
   migrate(db);
   const journal = openDeployJournal(db);
@@ -30,6 +50,7 @@ function readyJournal() {
     deploymentActivationEnabled: false,
     updatedAt: "2026-10-06T00:00:00.000Z",
   });
+  journal.pinTrust("pinned-key", publicKey);
   journal.seedOwner(initial);
   journal.beginDrain("repo-a", 1);
   const next: EngineeringOwnerRecord = signed({
@@ -40,10 +61,11 @@ function readyJournal() {
     deploymentActivationEnabled: true,
     updatedAt: "2026-10-06T00:00:00.000Z",
   });
+  const digest = journal.pinAdapter(runtimeAdapter("repo-a", rollback));
   const genesis: GenesisAdapterRecord = signed({
     repositoryId: "repo-a",
     adapterVersion: "1",
-    adapterDigest: "d".repeat(64),
+    adapterDigest: digest,
     mergeSha: "a".repeat(40),
     treeHash: "b".repeat(40),
     mergeEventId: "adapter-merge",
@@ -54,8 +76,8 @@ function readyJournal() {
     expectedGeneration: 1,
     next,
     genesis,
-    publicKey,
     rollback: false,
+    keyId: "pinned-key",
   });
   journal.applyDecision({
     kind: "intent",
@@ -74,6 +96,15 @@ function readyJournal() {
 
 function callbacks(log: string[], overrides: Partial<RuntimeCallbacks> = {}): RuntimeCallbacks {
   return {
+    runtimeTargetId: "runtime-a",
+    busyCheckId: "busy-a",
+    verifyCheckId: "verify-a",
+    reloadId: "reload-a",
+    reload: () => undefined,
+    verify: () => true,
+    verifyRestore: () => true,
+    deliverReceipt: () => true,
+    observe: () => "",
     busy: () => {
       log.push("busy");
       return false;
@@ -187,7 +218,7 @@ describe("executeRelease", () => {
   });
 
   it("emits nothing-to-deploy without writing and fences an unsafe rollback", () => {
-    const { journal } = readyJournal();
+    const { journal } = readyJournal("unsafe");
     const empty = buildArtifactEnvelope({
       repositoryId: "repo-a",
       mergeSha: "c".repeat(40),
@@ -395,7 +426,7 @@ describe("executeRelease", () => {
   });
 
   it("returns fenced for a later attempt after unsafe rollback", () => {
-    const { journal } = readyJournal();
+    const { journal } = readyJournal("unsafe");
     executeRelease({
       envelope: envelope(),
       bytes: new Map([["src/app.py", Buffer.from("print(1)\n")]]),
@@ -488,7 +519,9 @@ function adopt(journal: ReturnType<typeof readyJournal>["journal"], repositoryId
       updatedAt: "2026-10-06T00:00:00.000Z",
     }),
   );
+  journal.pinTrust("pinned-key", publicKey);
   journal.beginDrain(repositoryId, 1);
+  const digest = journal.pinAdapter(runtimeAdapter(repositoryId));
   journal.completeOwnerChange({
     repositoryId,
     expectedGeneration: 1,
@@ -503,14 +536,14 @@ function adopt(journal: ReturnType<typeof readyJournal>["journal"], repositoryId
     genesis: signed({
       repositoryId,
       adapterVersion: "1",
-      adapterDigest: "d".repeat(64),
+      adapterDigest: digest,
       mergeSha: "a".repeat(40),
       treeHash: "b".repeat(40),
       mergeEventId: `adapter-${repositoryId}`,
       targetGeneration: 2,
     }),
-    publicKey,
     rollback: false,
+    keyId: "pinned-key",
   });
   journal.applyDecision({
     kind: "intent",

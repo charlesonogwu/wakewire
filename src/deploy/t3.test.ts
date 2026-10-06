@@ -76,8 +76,9 @@ describe("ReviewHostRouter", () => {
     await expect(router.wake(request)).rejects.toThrow(/threadId/);
   });
 
-  it("rejects an invalid verdict signature", () => {
+  it("rejects an invalid verdict signature", async () => {
     const router = createReviewHostRouter([lane()], transport(), publicKey);
+    await router.wake(request);
     expect(() =>
       router.ingestVerdict({
         ...request,
@@ -87,7 +88,7 @@ describe("ReviewHostRouter", () => {
     ).toThrow(/signature/);
   });
 
-  it("accepts a reviewer-signed verdict and ignores the live port", () => {
+  it("accepts a reviewer-signed verdict and ignores the live port", async () => {
     const body = {
       laneId: request.laneId,
       role: request.role,
@@ -103,6 +104,7 @@ describe("ReviewHostRouter", () => {
       "base64url",
     );
     const router = createReviewHostRouter([lane()], transport(), publicKey);
+    await router.wake({ ...request, requestId: "r2" });
     expect(router.ingestVerdict({ ...body, signature }).requestId).toBe("r2");
     expect(path.isAbsolute("/dev/null")).toBe(true);
   });

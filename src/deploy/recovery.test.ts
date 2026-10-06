@@ -30,6 +30,7 @@ describe("recover", () => {
       deploymentActivationEnabled: false,
       updatedAt: "2026-10-06T00:00:00.000Z",
     });
+    journal.pinTrust("pinned-key", publicKey);
     journal.seedOwner(initial);
     journal.beginDrain("repo-a", 1);
     const genesis: GenesisAdapterRecord = signed({
@@ -53,7 +54,7 @@ describe("recover", () => {
         updatedAt: "2026-10-06T00:00:00.000Z",
       }),
       genesis,
-      publicKey,
+      keyId: "pinned-key",
       rollback: false,
     });
     journal.applyDecision({
@@ -74,21 +75,27 @@ describe("recover", () => {
     );
     journal.retain(1, "uncertain");
     expect(
-      recover(db, {
-        repositoryId: "repo-a",
-        intentId: "intent-d1",
-        token: 1,
-        observedManifest: "other",
-      }),
+      recover(
+        db,
+        {
+          repositoryId: "repo-a",
+          intentId: "intent-d1",
+          token: 1,
+        },
+        () => "other",
+      ),
     ).toBe("fenced");
     expect(journal.tryAcquire(2)).toBe("fenced");
     expect(
-      recover(db, {
-        repositoryId: "repo-a",
-        intentId: "intent-d1",
-        token: 1,
-        observedManifest: "manifest-hash",
-      }),
+      recover(
+        db,
+        {
+          repositoryId: "repo-a",
+          intentId: "intent-d1",
+          token: 1,
+        },
+        () => "manifest-hash",
+      ),
     ).toBe("cleared");
     expect(journal.tryAcquire(2)).toBe("acquired");
     expect(journal.intentId("recovery-must-not-create")).toBeNull();

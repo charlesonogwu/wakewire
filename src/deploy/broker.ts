@@ -40,7 +40,7 @@ export function createGuardedTransport(inner: RawTransport): GuardedTransport {
   };
 }
 
-export function createBroker(transport: GuardedTransport, scope: BrokerScope): Broker {
+export function createBroker(transport: GuardedTransport, scope: BrokerScope, role: Role): Broker {
   const assertRepository = (input: { owner: string; name: string }) => {
     if (input.owner !== scope.owner || input.name !== scope.name) {
       throw new Error("repository is outside the broker lane");
@@ -51,7 +51,7 @@ export function createBroker(transport: GuardedTransport, scope: BrokerScope): B
       assertRepository(input);
       if (!scope.branches.includes(input.branch))
         throw new Error("branch is outside the owned lane");
-      if (input.role !== "author") throw new Error("publish requires the author role");
+      if (role !== "author") throw new Error("publish requires the author role");
       await transport.post(`/repos/${input.owner}/${input.name}/git/refs`, {
         ref: `refs/heads/${input.branch}`,
         sha: input.sha,

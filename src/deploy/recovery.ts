@@ -4,10 +4,13 @@ export interface RecoveryEvidence {
   repositoryId: string;
   intentId: string;
   token: number;
-  observedManifest: string;
 }
 
-export function recover(db: Database, evidence: RecoveryEvidence): "cleared" | "fenced" {
+export function recover(
+  db: Database,
+  evidence: RecoveryEvidence,
+  observe: () => string,
+): "cleared" | "fenced" {
   const intent = db
     .prepare(
       "SELECT repository_id, manifest_hash, target_manifest FROM deploy_intents WHERE id = ?",
@@ -16,8 +19,11 @@ export function recover(db: Database, evidence: RecoveryEvidence): "cleared" | "
     | { repository_id: string; manifest_hash: string | null; target_manifest: string | null }
     | undefined;
   if (!intent || intent.repository_id !== evidence.repositoryId) return "fenced";
-  const observed = intent.manifest_hash ?? intent.target_manifest;
-  if (observed !== evidence.observedManifest) return "fenced";
+  const observedRuntime = observe();
+  const matches =
+    observedRuntime.length > 0 &&
+    (observedRuntime === intent.manifest_hash || observedRuntime === intent.target_manifest);
+  if (!matches) return "fenced";
   const result = db
     .prepare(
       `UPDATE deploy_fence
@@ -28,6 +34,10 @@ export function recover(db: Database, evidence: RecoveryEvidence): "cleared" | "
   return result.changes === 1 ? "cleared" : "fenced";
 }
 
-export function recoverObserved(db: Database, evidence: RecoveryEvidence): "cleared" | "fenced" {
-  return recover(db, evidence);
+export function recoverObserved(
+  db: Database,
+  evidence: RecoveryEvidence,
+  observe: () => string,
+): "cleared" | "fenced" {
+  return recover(db, evidence, observe);
 }

@@ -232,6 +232,38 @@ const MIGRATIONS: ReadonlyArray<{
       );
     `,
   },
+  {
+    version: 7,
+    name: "deploy-trust",
+    sql: `
+      CREATE TABLE deploy_trust_keys (
+        key_id TEXT PRIMARY KEY,
+        public_pem TEXT NOT NULL
+      );
+      CREATE TABLE deploy_adapters (
+        digest TEXT PRIMARY KEY,
+        version TEXT NOT NULL,
+        repository_id TEXT NOT NULL,
+        body TEXT NOT NULL
+      );
+      CREATE TABLE deploy_previous_files (
+        intent_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        bytes BLOB NOT NULL,
+        PRIMARY KEY (intent_id, path)
+      );
+      CREATE TABLE deploy_wakes (
+        request_id TEXT PRIMARY KEY,
+        repository_id TEXT NOT NULL,
+        lane_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        pr INTEGER NOT NULL,
+        head_sha TEXT NOT NULL,
+        base_sha TEXT NOT NULL,
+        tree_hash TEXT NOT NULL
+      );
+    `,
+  },
 ];
 
 /** targetVersion is for tests that need to exercise upgrade paths from older schemas. */

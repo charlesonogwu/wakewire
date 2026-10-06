@@ -59,6 +59,7 @@ function journal() {
   const db = new DatabaseConstructor(":memory:");
   migrate(db);
   const store = openDeployJournal(db);
+  store.pinTrust("pinned-key", publicKey);
   store.seedOwner(owner(1));
   return store;
 }
@@ -104,7 +105,7 @@ describe("deploy journal", () => {
       expectedGeneration: 1,
       next: owner(2),
       genesis: genesis(),
-      publicKey,
+      keyId: "pinned-key",
       rollback: false,
     });
     expect(store.disposition("repo-a", "adapter-merge")).toBe("bootstrap-consumed");
@@ -125,7 +126,7 @@ describe("deploy journal", () => {
         expectedGeneration: 1,
         next: owner(2),
         genesis: genesis(),
-        publicKey,
+        keyId: "pinned-key",
         rollback: false,
       }),
     ).toThrow(/active transaction/);
@@ -135,7 +136,7 @@ describe("deploy journal", () => {
       expectedGeneration: 1,
       next: owner(2),
       genesis: genesis(),
-      publicKey,
+      keyId: "pinned-key",
       rollback: false,
     });
     expect(store.tryAcquire(1)).toBe("acquired");
@@ -147,7 +148,7 @@ describe("deploy journal", () => {
         expectedGeneration: 2,
         next: owner(1, "stable"),
         genesis: null,
-        publicKey,
+        keyId: "pinned-key",
         rollback: true,
       }),
     ).toThrow(/uncertainty fence/);

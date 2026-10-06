@@ -73,17 +73,24 @@ describe("deploy cli", () => {
     expect(output).not.toContain("ghp_");
   });
 
-  it("recovers only through an observed manifest and leaves an unverified fence", () => {
+  it("rejects a caller manifest and recovers only with repository, intent, and token", () => {
     const calls: string[] = [];
     const local = {
       ...deps,
-      recover: (evidence: { observedManifest: string }) => {
-        calls.push(evidence.observedManifest);
+      recover: (evidence: { repositoryId: string; intentId: string; token: number }) => {
+        calls.push(`${evidence.repositoryId}:${evidence.intentId}:${evidence.token}`);
         return "fenced" as const;
       },
     };
-    const manifest = "ab".repeat(32);
     expect(
+      dispatchDeploy(
+        ["recover", "--repository", "example/one", "--intent", "intent-1", "--token", "4"],
+        local,
+      ),
+    ).toEqual({ status: "fenced" });
+    expect(calls).toEqual(["example/one:intent-1:4"]);
+    expect(() => dispatchDeploy(["recover"], local)).toThrow(/repository, intent, and token/);
+    expect(() =>
       dispatchDeploy(
         [
           "recover",
@@ -94,20 +101,15 @@ describe("deploy cli", () => {
           "--token",
           "4",
           "--manifest",
-          manifest,
+          "ab".repeat(32),
         ],
         local,
       ),
-    ).toEqual({
-      status: "fenced",
-    });
-    expect(calls).toEqual([manifest]);
-    expect(() => dispatchDeploy(["recover"], local)).toThrow(/manifest/);
-    expect(() => dispatchDeploy(["recover", "--manifest", manifest], local)).toThrow(/manifest/);
-    expect(() => dispatchDeploy(["recover", "--manifest", manifest, "--clear"], local)).toThrow(
-      /forbidden/,
-    );
-    expect(calls).toEqual([manifest]);
+    ).toThrow(/manifest/);
+    expect(() =>
+      dispatchDeploy(["recover", "--manifest", "ab".repeat(32), "--clear"], local),
+    ).toThrow(/forbidden/);
+    expect(calls).toEqual(["example/one:intent-1:4"]);
   });
 
   it("runs the executor only inside the synthetic dry-run adapter", () => {

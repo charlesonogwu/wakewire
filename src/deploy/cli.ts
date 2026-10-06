@@ -1,6 +1,7 @@
 import { generateKeyPairSync, type KeyObject, sign } from "node:crypto";
 import DatabaseConstructor, { type Database } from "better-sqlite3";
 import { migrate } from "../db/migrations.js";
+import type { RuntimeAdapter } from "./adapter.js";
 import { buildArtifactEnvelope } from "./artifact.js";
 import { canonicalJson } from "./crypto.js";
 import { type ExecuteRequest, executeRelease } from "./executor.js";
@@ -101,6 +102,21 @@ export function runDryRun(): {
   migrate(db);
   const journal = openDeployJournal(db);
   const repositoryId = "example/one";
+  journal.pinTrust("pinned-key", publicKey);
+  const adapter: RuntimeAdapter = {
+    version: "1",
+    repositoryId,
+    allow: ["docs/"],
+    deny: [".env"],
+    runtimeTargetId: "runtime-dry",
+    busyCheckId: "busy-dry",
+    verifyCheckId: "verify-dry",
+    reloadId: "reload-dry",
+    rollback: "files",
+    architecture: "x64",
+    runtimeVersions: { node: "20" },
+  };
+  const digest = journal.pinAdapter(adapter);
   journal.seedOwner(
     ownerRecord(privateKey, {
       repositoryId,
@@ -126,7 +142,7 @@ export function runDryRun(): {
       return token;
     },
     artifactFor: () =>
-      dryArtifact(privateKey, repositoryId, () => {
+      dryArtifact(privateKey, repositoryId, adapter, () => {
         writes += 1;
       }),
     execute: (input) => {
@@ -147,9 +163,9 @@ export function runDryRun(): {
       deploymentActivationEnabled: true,
       updatedAt: "2026-10-06T00:00:00.000Z",
     }),
-    genesis: genesisRecord(privateKey, repositoryId),
-    publicKey,
+    genesis: genesisRecord(privateKey, repositoryId, digest),
     rollback: false,
+    keyId: "pinned-key",
   });
   service.tick(repositoryId);
   db.close();
@@ -158,33 +174,33 @@ export function runDryRun(): {
 }
 
 function parseRecover(rest: readonly string[]): RecoveryEvidence {
+  if (rest.some((arg) => arg === "--manifest" || arg.startsWith("--manifest="))) {
+    throw new Error("caller manifest is rejected");
+  }
   const values = new Map<string, string>();
   for (let index = 0; index < rest.length; index += 2) {
     const flag = rest[index];
     const value = rest[index + 1];
     if (!flag || !value || value.startsWith("--")) {
-      throw new Error("recovery requires repository, intent, token, and observed manifest");
+      throw new Error("recovery requires repository, intent, and token");
     }
     values.set(flag, value);
   }
   const repositoryId = values.get("--repository");
   const intentId = values.get("--intent");
   const tokenText = values.get("--token");
-  const observedManifest = values.get("--manifest");
   const token = Number(tokenText);
   if (
-    values.size !== 4 ||
+    values.size !== 3 ||
     !repositoryId ||
     !intentId ||
     !tokenText ||
     !Number.isInteger(token) ||
-    token <= 0 ||
-    !observedManifest ||
-    !/^[0-9a-f]{64}$/.test(observedManifest)
+    token <= 0
   ) {
-    throw new Error("recovery requires repository, intent, token, and observed manifest");
+    throw new Error("recovery requires repository, intent, and token");
   }
-  return { repositoryId, intentId, token, observedManifest };
+  return { repositoryId, intentId, token };
 }
 
 function ownerRecord(
@@ -197,11 +213,15 @@ function ownerRecord(
   };
 }
 
-function genesisRecord(privateKey: KeyObject, repositoryId: string): GenesisAdapterRecord {
+function genesisRecord(
+  privateKey: KeyObject,
+  repositoryId: string,
+  adapterDigest: string,
+): GenesisAdapterRecord {
   const body = {
     repositoryId,
     adapterVersion: "1",
-    adapterDigest: "d".repeat(64),
+    adapterDigest,
     mergeSha: "a".repeat(40),
     treeHash: "b".repeat(40),
     mergeEventId: "adapter-merge",
@@ -238,6 +258,7 @@ function sampleMerge(repositoryId: string): FreshMerge {
 function dryArtifact(
   privateKey: KeyObject,
   repositoryId: string,
+  adapter: RuntimeAdapter,
   write: () => void,
 ): Omit<ExecuteRequest, "publicKey" | "journal" | "intentId" | "token" | "receiptId" | "replay"> {
   const bytes = Buffer.from("# example\n");
@@ -258,10 +279,14 @@ function dryArtifact(
     }),
     bytes: new Map(),
     expected: { architecture: "x64", runtimeVersions: { node: "20" }, repositoryId },
-    adapterDigest: "d".repeat(64),
-    adapterPolicy: { allow: ["docs/"], deny: [] },
-    adapterRollback: "files",
+    adapterDigest: "ignored",
+    adapterPolicy: { allow: [".env"], deny: [] },
+    adapterRollback: "unsafe",
     callbacks: {
+      runtimeTargetId: adapter.runtimeTargetId,
+      busyCheckId: adapter.busyCheckId,
+      verifyCheckId: adapter.verifyCheckId,
+      reloadId: adapter.reloadId,
       busy: () => false,
       lease: () => ({ release() {} }),
       idle: () => true,
@@ -269,6 +294,11 @@ function dryArtifact(
       write: () => write(),
       restore: () => undefined,
       previous: () => new Map(),
+      reload: () => undefined,
+      verify: () => true,
+      verifyRestore: () => true,
+      deliverReceipt: () => true,
+      observe: () => "",
     },
   };
 }

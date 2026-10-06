@@ -108,8 +108,15 @@ function assertSafePath(filePath: string): void {
   ) {
     throw new Error(`windows absolute path ${filePath}`);
   }
-  if (filePath.startsWith("/") || filePath.includes("\\") || filePath.split("/").includes("..")) {
+  if (filePath.startsWith("/") || filePath.includes("\\")) {
     throw new Error(`path traversal ${filePath}`);
+  }
+  const parts = filePath.split("/");
+  if (parts.some((part) => part === "..")) {
+    throw new Error(`path traversal ${filePath}`);
+  }
+  if (parts.some((part) => part.length === 0 || part === ".")) {
+    throw new Error(`non-canonical path ${filePath}`);
   }
 }
 
