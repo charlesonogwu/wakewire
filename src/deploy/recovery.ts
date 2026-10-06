@@ -105,7 +105,7 @@ export function reconcileRestart(
     finishRestart(db, evidence, intent, "rolled-back", observed);
     return "rolled-back";
   }
-  return fenceRestart(db, evidence);
+  return fenceRestart(db, evidence, intent, observed);
 }
 
 function finishRestart(
@@ -174,18 +174,68 @@ function finishRestart(
   run();
 }
 
-function fenceRestart(db: Database, evidence: RecoveryEvidence): "fenced" {
+function fenceRestart(
+  db: Database,
+  evidence: RecoveryEvidence,
+  intent: { id: string; repository_id: string; merge_sha: string; tree_hash: string },
+  observed: string,
+): "fenced" {
+  const reason = "restart observation does not match a durable manifest";
   const run = db.transaction(() => {
-    db.prepare(
-      `UPDATE deploy_fence
-       SET held = 1, fenced = 1, reason = ?
-       WHERE id = 1 AND token = ? AND repository_id = ? AND intent_id = ? AND held = 1 AND fenced = 0`,
-    ).run(
-      "restart observation does not match a durable manifest",
-      evidence.token,
-      evidence.repositoryId,
+    const lease = db
+      .prepare(
+        "SELECT id FROM deploy_leases WHERE id = ? AND repository_id = ? AND kind = 'deployment' AND released = 0",
+      )
+      .get(`deployment:${evidence.intentId}:${evidence.token}`, evidence.repositoryId);
+    if (!lease) throw new Error("interrupted deployment identity changed during observation");
+    const lock = db
+      .prepare(
+        "SELECT token FROM deploy_fence WHERE id = 1 AND token = ? AND repository_id = ? AND intent_id = ? AND held = 1 AND fenced = 0",
+      )
+      .get(evidence.token, evidence.repositoryId, evidence.intentId);
+    if (!lock) throw new Error("interrupted deployment identity changed during observation");
+    const updated = db
+      .prepare(
+        "UPDATE deploy_intents SET phase = 'fenced' WHERE id = ? AND repository_id = ? AND phase IN ('activating', 'prepared')",
+      )
+      .run(evidence.intentId, evidence.repositoryId);
+    if (updated.changes !== 1)
+      throw new Error("interrupted deployment intent changed during observation");
+    const at = new Date().toISOString();
+    db.prepare("INSERT INTO deploy_phases (intent_id, phase, at) VALUES (?, 'fenced', ?)").run(
       evidence.intentId,
+      at,
     );
+    db.prepare(
+      `INSERT INTO deploy_restart_fences (intent_id, repository_id, token, reason, observed_manifest, at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(evidence.intentId, evidence.repositoryId, evidence.token, reason, observed, at);
+    const existing = db
+      .prepare("SELECT id FROM deploy_outbox WHERE intent_id = ?")
+      .get(evidence.intentId);
+    if (existing) throw new Error("interrupted deployment already has an outcome receipt");
+    db.prepare(
+      `INSERT INTO deploy_outbox
+       (id, intent_id, kind, acknowledged, repository_id, merge_sha, tree_hash, manifest_hash)
+       VALUES (?, ?, 'fenced', 0, ?, ?, ?, ?)`,
+    ).run(
+      `reconcile-${intent.id}`,
+      intent.id,
+      intent.repository_id,
+      intent.merge_sha,
+      intent.tree_hash,
+      observed,
+    );
+    releaseMatchingDeploymentLease(db, evidence);
+    const released = db
+      .prepare(
+        `UPDATE deploy_fence
+       SET held = 0, fenced = 0, reason = NULL
+       WHERE id = 1 AND token = ? AND repository_id = ? AND intent_id = ? AND held = 1 AND fenced = 0`,
+      )
+      .run(evidence.token, evidence.repositoryId, evidence.intentId);
+    if (released.changes !== 1)
+      throw new Error("interrupted deployment lock changed during observation");
   });
   run();
   return "fenced";

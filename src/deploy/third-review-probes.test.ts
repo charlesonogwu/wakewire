@@ -481,6 +481,140 @@ describe("third review probes", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }, 20000);
 
+  it("terminally fences only the copied release when trusted restart observation mismatches", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ww-crash-mismatch-"));
+    const dbPath = path.join(dir, "wakewire.sqlite");
+    const copyPath = path.join(dir, "app.py");
+    const counterPath = path.join(dir, "copies.txt");
+    const keyPath = path.join(dir, "key.pem");
+    let db: DatabaseConstructor.Database | null = null;
+    fs.writeFileSync(keyPath, privateKey.export({ type: "pkcs8", format: "pem" }));
+    try {
+      const setup = new DatabaseConstructor(dbPath);
+      migrate(setup);
+      const store = openDeployJournal(setup);
+      store.pinTrust("pinned-key", publicKey);
+      store.seedOwner(owner("repo-a", 1, false, "legacy"), "pinned-key");
+      cutover(store);
+      store.applyDecision({ ...intent("crash"), deliveryId: "crash" });
+      store.seedOwner(owner("repo-b", 1, true, "omarchy"));
+      store.applyDecision({ ...intent("other"), repositoryId: "repo-b" });
+      store.acquireLease({
+        id: "deployment:intent-other:99",
+        repositoryId: "repo-b",
+        generation: 1,
+        kind: "deployment",
+      });
+      setup.close();
+
+      const child = spawn(
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          path.join(root, "src", "deploy", "crash-child.ts"),
+          dbPath,
+          copyPath,
+          counterPath,
+          keyPath,
+        ],
+        { cwd: root, stdio: ["ignore", "pipe", "pipe"] },
+      );
+      const stderr: Buffer[] = [];
+      child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
+      const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+        (resolve, reject) => {
+          const timer = setTimeout(() => {
+            child.kill("SIGKILL");
+            reject(new Error(`crash child timed out: ${Buffer.concat(stderr).toString()}`));
+          }, 15000);
+          child.once("exit", (code, signal) => {
+            clearTimeout(timer);
+            resolve({ code, signal });
+          });
+        },
+      );
+      expect(exit.signal === "SIGKILL" || (exit.signal === null && exit.code !== 0)).toBe(true);
+      expect(fs.readFileSync(copyPath, "utf8")).toBe("payload-v1\n");
+      expect(fs.readFileSync(counterPath, "utf8").trim().split("\n")).toEqual(["copy"]);
+
+      db = new DatabaseConstructor(dbPath);
+      const reopened = openDeployJournal(db);
+      let executions = 0;
+      const service = createDeploymentService({
+        host: "omarchy",
+        publicKey,
+        journal: reopened,
+        freshMerges: () => [],
+        execute: () => {
+          executions += 1;
+          return { status: "fenced" };
+        },
+        runtimeObserverFor: (repositoryId) =>
+          repositoryId === "repo-a"
+            ? hooks({ observe: () => "neither-durable-manifest" })
+            : undefined,
+      });
+      expect(service.tick("repo-a")).toEqual({ decisions: 0, executions: 0 });
+      expect(reopened.intentRecord("intent-crash")?.phase).toBe("fenced");
+      expect(reopened.phases("intent-crash").at(-1)).toBe("fenced");
+      expect(
+        db
+          .prepare("SELECT intent_id, kind, repository_id FROM deploy_outbox WHERE intent_id = ?")
+          .get("intent-crash"),
+      ).toMatchObject({
+        intent_id: "intent-crash",
+        kind: "fenced",
+        repository_id: "repo-a",
+      });
+      expect(
+        db
+          .prepare(
+            "SELECT repository_id, intent_id, token, reason FROM deploy_restart_fences WHERE intent_id = ?",
+          )
+          .get("intent-crash"),
+      ).toMatchObject({
+        repository_id: "repo-a",
+        intent_id: "intent-crash",
+        token: 4,
+        reason: "restart observation does not match a durable manifest",
+      });
+      expect(reopened.activeDeploymentLease("repo-a")).toBe(false);
+      expect(reopened.activeDeploymentLease("repo-b")).toBe(true);
+      expect(reopened.intentRecord("intent-other")?.phase).toBe("recorded");
+      expect(db.prepare("SELECT held, fenced FROM deploy_fence WHERE id = 1").get()).toEqual({
+        held: 0,
+        fenced: 0,
+      });
+      expect(reopened.tryAcquire(8, { repositoryId: "repo-a", intentId: "intent-crash" })).toBe(
+        "acquired",
+      );
+      reopened.release(8);
+      expect(service.tick("repo-a")).toEqual({ decisions: 0, executions: 0 });
+      expect(executions).toBe(0);
+      expect(reopened.intentRecord("intent-other")?.phase).toBe("recorded");
+      expect(reopened.activeDeploymentLease("repo-b")).toBe(true);
+      const otherService = createDeploymentService({
+        host: "omarchy",
+        publicKey,
+        journal: reopened,
+        freshMerges: () => [],
+        execute: () => {
+          const lock = reopened.tryAcquire(9, { repositoryId: "repo-b", intentId: "intent-other" });
+          if (lock === "acquired") reopened.release(9);
+          return { status: lock === "fenced" ? "fenced" : "pending" };
+        },
+      });
+      expect(otherService.tick("repo-b")).toEqual({ decisions: 0, executions: 1 });
+      expect(reopened.intentRecord("intent-other")?.phase).toBe("recorded");
+      expect(reopened.activeDeploymentLease("repo-b")).toBe(true);
+      expect(fs.readFileSync(counterPath, "utf8").trim().split("\n")).toEqual(["copy"]);
+    } finally {
+      db?.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20000);
+
   it("binds a receipt to one intent and reuses the outbox row when delivery throws", () => {
     const { db, store } = database();
     cutover(store);

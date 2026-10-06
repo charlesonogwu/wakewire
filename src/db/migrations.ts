@@ -287,6 +287,20 @@ const MIGRATIONS: ReadonlyArray<{
       );
     `,
   },
+  {
+    version: 9,
+    name: "deploy-restart-fence-evidence",
+    sql: `
+      CREATE TABLE deploy_restart_fences (
+        intent_id TEXT PRIMARY KEY,
+        repository_id TEXT NOT NULL,
+        token INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        observed_manifest TEXT NOT NULL,
+        at TEXT NOT NULL
+      );
+    `,
+  },
 ];
 
 /** targetVersion is for tests that need to exercise upgrade paths from older schemas. */
