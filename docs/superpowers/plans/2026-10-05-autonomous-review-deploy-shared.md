@@ -39,11 +39,10 @@
 - Create: `src/deploy/registry.test.ts`
 - Create: `src/deploy/lanes.ts`
 - Create: `src/deploy/lanes.test.ts`
-- Modify: `src/paths.ts`
 
 **Interfaces:**
 - Produces: `LaneRecord`, `RepositoryRegistry.load(path)`, `LaneRouter.route(event)`, and immutable repository/task identity types.
-- Consumes: `wakewireHome()` for the private registry root.
+- Consumes: an explicit registry path supplied by the trusted caller; no live-path default.
 
 - [ ] **Step 1: Write failing registry and routing tests**
 
@@ -64,7 +63,7 @@ it("routes simultaneous repositories without context bleed", () => {
 Run: `npx vitest run src/deploy/registry.test.ts src/deploy/lanes.test.ts`
 Expected: FAIL because the deploy registry modules do not exist.
 
-- [ ] **Step 3: Implement strict types, private registry loading, overlap checks, and idempotent routing**
+- [ ] **Step 3: Implement strict types, injected registry loading, overlap checks, and idempotent routing**
 
 ```ts
 export interface LaneRecord {
@@ -85,7 +84,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/deploy/types.ts src/deploy/registry.ts src/deploy/registry.test.ts src/deploy/lanes.ts src/deploy/lanes.test.ts src/paths.ts
+git add src/deploy/types.ts src/deploy/registry.ts src/deploy/registry.test.ts src/deploy/lanes.ts src/deploy/lanes.test.ts
 git commit -m "feat: add isolated deployment lanes"
 ```
 
@@ -118,7 +117,7 @@ Expected: FAIL because `ReviewHostRouter` is missing.
 
 - [ ] **Step 3: Implement a narrow T3 client that transmits only structured wake records**
 
-The model-facing request contains `laneId`, `role`, `requestId`, repository ID, PR, and exact candidate IDs. Do not extend the Codex Desktop sink or include production payloads.
+The model-facing request contains `laneId`, `role`, `requestId`, repository ID, PR, and exact candidate IDs. The T3 transport is injected; tests cannot default to the live T3 port. Do not extend the Codex Desktop sink or include production payloads.
 
 - [ ] **Step 4: Verify**
 
@@ -184,11 +183,9 @@ git commit -m "feat: track exact review candidates"
 - Create: `src/deploy/broker.test.ts`
 - Create: `src/deploy/reconcile.ts`
 - Create: `src/deploy/reconcile.test.ts`
-- Modify: `src/coordination/github.ts`
-- Modify: `src/coordination/github.test.ts`
 
 **Interfaces:**
-- Produces: `Broker.publishBranch`, `Broker.comment`, `Broker.status`, and `MergeReconciler.scan()`.
+- Produces: `Broker.publishBranch`, `Broker.comment`, `Broker.status`, `MergeReconciler.scan()`, and `MergeDecision` (`intent` or `refuse`) carrying `repositoryId`, `repairId`, and `notice`.
 - Consumes: read-only GitHub snapshot client and candidate state.
 
 - [ ] **Step 1: Write failing authority and reconciliation tests**
@@ -207,17 +204,17 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement fixed endpoint allowlists and periodic fresh-state reconciliation**
 
-The broker may publish an owned branch, comment, and status only. It exposes neither raw transport nor merge endpoint to a model process.
+The broker may publish an owned branch, comment, and status only. Its injected transport owns the endpoint allowlist; it does not reuse or modify the live coordination GitHub client. It exposes neither raw transport nor merge endpoint to a model process. Reconciliation returns `intent` or `refuse`; it does not write pauses or deploy intents.
 
 - [ ] **Step 4: Verify**
 
-Run: `npx vitest run src/deploy/broker.test.ts src/deploy/reconcile.test.ts src/coordination/github.test.ts && npm run typecheck`
+Run: `npx vitest run src/deploy/broker.test.ts src/deploy/reconcile.test.ts && npm run typecheck`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/deploy/broker.ts src/deploy/broker.test.ts src/deploy/reconcile.ts src/deploy/reconcile.test.ts src/coordination/github.ts src/coordination/github.test.ts
+git add src/deploy/broker.ts src/deploy/broker.test.ts src/deploy/reconcile.ts src/deploy/reconcile.test.ts
 git commit -m "feat: validate operator merges"
 ```
 
@@ -231,7 +228,7 @@ git commit -m "feat: validate operator merges"
 
 **Interfaces:**
 - Produces: `buildArtifactEnvelope`, `verifyArtifactEnvelope`, and `RuntimeAdapterSchema`.
-- Consumes: actual merge tree, previously activated adapter version, and an injected signing provider.
+- Consumes: actual merge tree, previously activated adapter version, an injected artifact byte source, and an injected signing provider.
 
 - [ ] **Step 1: Write failing provenance tests**
 
@@ -283,10 +280,11 @@ git commit -m "feat: sign immutable release artifacts"
 
 **Interfaces:**
 - Produces: deployment-intent repository, receipt outbox, monotonic fencing tokens, and repository/global pause state.
+- Consumes: `MergeDecision` from Task 4. Only an `intent` may create a deployment intent. A `refuse` persists a repository pause and notice, and must never create a deployment intent.
 
 - [ ] **Step 1: Write migration and crash-recovery tests**
 
-Cover intent-before-mutation, process death during activation, lost acknowledgment, stale fencing token, repository pause, global uncertainty, linked repair release, and operator fence clearing without failed-release approval.
+Cover intent-before-mutation, process death during activation, lost acknowledgment, stale fencing token, repository pause, global uncertainty, linked repair release, `refuse` writing a pause without an intent, and rejection of every direct fence-clear attempt.
 
 - [ ] **Step 2: Prove red**
 
@@ -295,7 +293,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Add append-only migration and transactional stores**
 
-Store candidate IDs, merge/tree hashes, phases, tokens, previous/current manifests, receipt acknowledgment, and pause/fence reasons. Never edit prior migrations.
+Store candidate IDs, merge/tree hashes, phases, tokens, previous/current manifests, receipt acknowledgment, and pause/fence reasons. Never edit prior migrations. Task 6 has no fence-clearing API: recovery in Task 7 is the only path that may clear a fence after proving the observed runtime manifest matches the journal.
 
 - [ ] **Step 4: Verify**
 
@@ -316,8 +314,6 @@ git commit -m "feat: persist deployment transactions"
 - Create: `src/deploy/executor.test.ts`
 - Create: `src/deploy/recovery.ts`
 - Create: `src/deploy/recovery.test.ts`
-- Modify: `src/daemon/daemon.ts`
-- Modify: `src/daemon/lifecycle.test.ts`
 
 **Interfaces:**
 - Consumes: verified artifact, activated adapter, journal, admission lease callback, and fence.
@@ -325,7 +321,7 @@ git commit -m "feat: persist deployment transactions"
 
 - [ ] **Step 1: Write executor ordering and rollback tests**
 
-Assert: advisory busy checks hold no global lock; admission lease precedes idle recheck; lock is bounded; ordering rechecks under lock; partial activation restores exact previous manifest; unsafe rollback fences; another repository remains pending rather than blocked; outbox replay does not reactivate.
+Assert: advisory busy checks hold no global lock; admission lease precedes idle recheck; lock is bounded; ordering rechecks under lock; partial activation restores exact previous manifest; unsafe rollback fences; another repository remains pending rather than blocked; outbox replay does not reactivate; `recover(observedManifest)` keeps the fence when the manifest differs and clears it without creating a deployment intent only when the manifest exactly matches the journal.
 
 - [ ] **Step 2: Prove red**
 
@@ -334,7 +330,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement the transaction without private commands**
 
-All business-specific operations are injected adapter callbacks identified by IDs. The generic executor never evaluates a shell command from a PR, issue, or artifact.
+All business-specific operations are injected adapter callbacks identified by IDs. The generic executor never evaluates a shell command from a PR, issue, or artifact. Keep the executor and recovery implementation as an un-wired library in this task; the daemon must not scan merges or activate artifacts yet.
 
 - [ ] **Step 4: Run full shared verification**
 
@@ -344,7 +340,7 @@ Expected: all commands pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/deploy/executor.ts src/deploy/executor.test.ts src/deploy/recovery.ts src/deploy/recovery.test.ts src/daemon/daemon.ts src/daemon/lifecycle.test.ts
+git add src/deploy/executor.ts src/deploy/executor.test.ts src/deploy/recovery.ts src/deploy/recovery.test.ts
 git commit -m "feat: execute fenced automatic deployments"
 ```
 
@@ -354,7 +350,6 @@ git commit -m "feat: execute fenced automatic deployments"
 - Create: `src/deploy/cli.ts`
 - Create: `src/deploy/cli.test.ts`
 - Modify: `src/cli.ts`
-- Modify: `src/daemon/api.ts`
 - Modify: `README.md`
 - Modify: `SECURITY.md`
 - Modify: `docs/trusted-github-handoffs.md`
@@ -364,7 +359,7 @@ git commit -m "feat: execute fenced automatic deployments"
 
 - [ ] **Step 1: Write failing CLI safety tests**
 
-Test default dry-run, no merge command, no arbitrary repo/path/command parameters, redacted status, explicit recovery token, and refusal to clear an unverified fence.
+Test default dry-run, no merge command, no arbitrary repo/path/command parameters, redacted status, explicit recovery token, refusal to clear an unverified fence, and proof that neither CLI nor daemon performs a live merge scan or activation by default.
 
 - [ ] **Step 2: Prove red**
 
@@ -373,7 +368,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement dry-run and documented cutover surfaces**
 
-Dry-run consumes synthetic repository IDs and artifacts only. Documentation uses placeholders and does not name private repositories or runtime paths.
+Dry-run consumes synthetic repository IDs and artifacts only and may invoke the Task 7 executor solely through its dry-run adapter. Documentation uses placeholders and does not name private repositories or runtime paths. This task does not wire the live daemon; real scanning and activation remain disabled until an operator-approved adapter release and private-repository cutover.
 
 - [ ] **Step 4: Run release-quality verification**
 
@@ -383,6 +378,6 @@ Expected: PASS and clean formatting.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/deploy/cli.ts src/deploy/cli.test.ts src/cli.ts src/daemon/api.ts README.md SECURITY.md docs/trusted-github-handoffs.md
+git add src/deploy/cli.ts src/deploy/cli.test.ts src/cli.ts README.md SECURITY.md docs/trusted-github-handoffs.md
 git commit -m "docs: add autonomous deployment dry run"
 ```
