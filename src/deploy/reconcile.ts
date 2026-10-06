@@ -28,6 +28,13 @@ export function scanMerge(
   return decision;
 }
 
+export function scan(
+  merges: readonly FreshMerge[],
+  seen = new Map<string, MergeDecision>(),
+): MergeDecision[] {
+  return merges.map((merge) => scanMerge(merge, seen));
+}
+
 function decide(merge: FreshMerge): MergeDecision {
   const refuse = (notice: string): MergeDecision => ({
     kind: "refuse",

@@ -19,6 +19,14 @@ import { loadConfig } from "./config.js";
 import { runDaemon } from "./daemon/daemon.js";
 import { openDatabase } from "./db/db.js";
 import { createStores } from "./db/repos.js";
+import {
+  dispatchDeploy,
+  readDeployStatus,
+  renderStatus,
+  runDryRun,
+  type StatusRepository,
+} from "./deploy/cli.js";
+import { recoverObserved } from "./deploy/recovery.js";
 import { createLogger } from "./logging.js";
 import { runMcpServer } from "./mcp/server.js";
 import { logFilePath, wakewireHome } from "./paths.js";
@@ -251,6 +259,34 @@ program
   .description("Run the wakewire MCP server on stdio (used by the Codex plugin)")
   .action(async () => {
     await runMcpServer();
+  });
+
+program
+  .command("deploy")
+  .description("Read deployment status, run a synthetic dry run, or recover a verified fence")
+  .argument("[action]", "status, dry-run, or recover", "dry-run")
+  .option("--manifest <hash>", "observed runtime manifest hash")
+  .action((action: string, options: { manifest?: string }) => {
+    const argv = [action];
+    if (options.manifest) argv.push("--manifest", options.manifest);
+    const db = action === "dry-run" ? null : openDatabase();
+    try {
+      const result = dispatchDeploy(argv, {
+        dryRun: () => runDryRun(),
+        recover: (manifest) => {
+          if (!db) throw new Error("recovery requires the local journal");
+          return recoverObserved(db, manifest);
+        },
+        status: () => (db ? readDeployStatus(db) : { repositories: [] }),
+      });
+      console.log(
+        action === "status"
+          ? renderStatus(result as { repositories: StatusRepository[] })
+          : JSON.stringify(result),
+      );
+    } finally {
+      db?.close();
+    }
   });
 
 program.parseAsync().catch((err) => {
