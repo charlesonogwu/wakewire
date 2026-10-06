@@ -9,6 +9,8 @@ import type { GenesisAdapterRecord } from "./genesis.js";
 import { openDeployJournal } from "./journal.js";
 import type { FreshMerge } from "./reconcile.js";
 import type { RecoveryEvidence } from "./recovery.js";
+import { recoverObserved } from "./recovery.js";
+import { type RuntimeObserverProvider, trustedRuntimeObservation } from "./runtime-observer.js";
 import { createDeploymentService } from "./service.js";
 import type { EngineeringOwnerRecord } from "./types.js";
 
@@ -27,6 +29,16 @@ export interface DeployCliDeps {
   dryRun: () => { repositoryId: "example/one"; status: "nothing-to-deploy"; writes: number };
   recover: (evidence: RecoveryEvidence) => "cleared" | "fenced";
   status: () => { repositories: StatusRepository[] };
+}
+
+export function recoverWithRuntimeAdapter(
+  db: Database,
+  evidence: RecoveryEvidence,
+  runtimeObserverFor: RuntimeObserverProvider | undefined,
+): "cleared" | "fenced" {
+  const journal = openDeployJournal(db);
+  const observe = trustedRuntimeObservation(journal, evidence.repositoryId, runtimeObserverFor);
+  return recoverObserved(db, evidence, observe);
 }
 
 const FORBIDDEN = /^--(repo|path|command|enable|activate|clear|merge)(?:=|$)/;

@@ -10,6 +10,7 @@ import {
   retain as retainFence,
 } from "./fence.js";
 import { type GenesisAdapterRecord, verifyGenesisAdapterRecord } from "./genesis.js";
+import { type RecoveryEvidence, reconcileRestart } from "./recovery.js";
 import type { EngineeringOwnerRecord, MergeDecision } from "./types.js";
 
 export interface RawReceipt {
@@ -133,6 +134,11 @@ export interface DeployJournal {
   }): void;
   releaseLease(id: string): void;
   activeDeploymentLease(repositoryId: string): boolean;
+  interruptedDeployment(repositoryId: string): RecoveryEvidence | null;
+  reconcileInterrupted(
+    evidence: RecoveryEvidence,
+    observe: () => string,
+  ): "finished" | "rolled-back" | "fenced" | "idle";
   beginDrain(repositoryId: string, expectedGeneration: number): void;
   setActiveDeploys(repositoryId: string, count: number): void;
   completeOwnerChange(change: OwnerChange): void;
@@ -749,6 +755,25 @@ export function openDeployJournal(db: Database): DeployJournal {
         )
         .get(repositoryId) as { id: string } | undefined;
       return Boolean(row);
+    },
+    interruptedDeployment(repositoryId) {
+      const row = db
+        .prepare(
+          "SELECT token, held, fenced, repository_id, intent_id FROM deploy_fence WHERE id = 1",
+        )
+        .get() as {
+        token: number;
+        held: number;
+        fenced: number;
+        repository_id: string | null;
+        intent_id: string | null;
+      };
+      if (row.held !== 1 || row.fenced !== 0 || row.repository_id !== repositoryId) return null;
+      if (!row.intent_id) throw new Error("interrupted deployment has no intent identity");
+      return { repositoryId, intentId: row.intent_id, token: row.token };
+    },
+    reconcileInterrupted(evidence, observe) {
+      return reconcileRestart(db, evidence, observe);
     },
     beginDrain(repositoryId, expectedGeneration) {
       const owner = readOwner(db, repositoryId);

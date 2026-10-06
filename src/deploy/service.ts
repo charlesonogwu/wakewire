@@ -3,6 +3,7 @@ import { verifySignature } from "./crypto.js";
 import type { ExecuteRequest, ExecuteResult } from "./executor.js";
 import type { DeployJournal, OpenIntent, OwnerChange, RawReceipt } from "./journal.js";
 import { type FreshMerge, scan } from "./reconcile.js";
+import { type RuntimeObserverProvider, trustedRuntimeObservation } from "./runtime-observer.js";
 import type { MergeDecision, OwnerHost } from "./types.js";
 
 export interface SignedEvent extends RawReceipt {
@@ -25,6 +26,7 @@ export interface DeploymentServiceDeps {
   ) => Omit<ExecuteRequest, "journal" | "intentId" | "token" | "receiptId" | "replay">;
   nextToken?: () => number;
   deliverReceipt?: (receiptId: string) => boolean;
+  runtimeObserverFor?: RuntimeObserverProvider;
 }
 
 export interface DeploymentService {
@@ -50,6 +52,18 @@ export function createDeploymentService(deps: DeploymentServiceDeps): Deployment
         !owner?.deploymentActivationEnabled
       ) {
         return { decisions: 0, executions: 0 };
+      }
+      const interrupted = deps.journal.interruptedDeployment(repositoryId);
+      if (interrupted) {
+        const observe = trustedRuntimeObservation(
+          deps.journal,
+          repositoryId,
+          deps.runtimeObserverFor,
+        );
+        const result = deps.journal.reconcileInterrupted(interrupted, observe);
+        if (result === "fenced") return { decisions: 0, executions: 0 };
+        if (result === "idle")
+          throw new Error("interrupted deployment changed during reconciliation");
       }
       let decisions = 0;
       let executions = 0;

@@ -22,11 +22,12 @@ import { createStores } from "./db/repos.js";
 import {
   dispatchDeploy,
   readDeployStatus,
+  recoverWithRuntimeAdapter,
   renderStatus,
   runDryRun,
   type StatusRepository,
 } from "./deploy/cli.js";
-import { recoverObserved } from "./deploy/recovery.js";
+import { configuredRuntimeObserverFor } from "./deploy/runtime-observer.js";
 import { createLogger } from "./logging.js";
 import { runMcpServer } from "./mcp/server.js";
 import { logFilePath, wakewireHome } from "./paths.js";
@@ -279,9 +280,7 @@ program
         dryRun: () => runDryRun(),
         recover: (evidence) => {
           if (!db) throw new Error("recovery requires the local journal");
-          return recoverObserved(db, evidence, () => {
-            throw new Error("trusted runtime observer is not configured");
-          });
+          return recoverWithRuntimeAdapter(db, evidence, configuredRuntimeObserverFor);
         },
         status: () => (db ? readDeployStatus(db) : { repositories: [] }),
       });

@@ -33,7 +33,7 @@ export function recover(
       )
       .run(evidence.token, evidence.repositoryId, evidence.intentId);
     if (result.changes !== 1) return "fenced" as const;
-    releaseMatchingDeploymentLease(db, evidence.repositoryId, evidence.intentId);
+    releaseMatchingDeploymentLease(db, evidence);
     return "cleared" as const;
   });
   return run();
@@ -49,29 +49,52 @@ export function recoverObserved(
 
 export function reconcileRestart(
   db: Database,
+  evidence: RecoveryEvidence,
   observe: () => string,
 ): "finished" | "rolled-back" | "fenced" | "idle" {
-  const open = db
+  const fence = db
+    .prepare("SELECT token, held, fenced, repository_id, intent_id FROM deploy_fence WHERE id = 1")
+    .get() as {
+    token: number;
+    held: number;
+    fenced: number;
+    repository_id: string | null;
+    intent_id: string | null;
+  };
+  if (
+    fence.repository_id !== evidence.repositoryId ||
+    fence.intent_id !== evidence.intentId ||
+    fence.token !== evidence.token ||
+    fence.held !== 1 ||
+    fence.fenced !== 0
+  )
+    return "idle";
+  const lease = db
+    .prepare(
+      "SELECT id FROM deploy_leases WHERE id = ? AND repository_id = ? AND kind = 'deployment' AND released = 0",
+    )
+    .get(`deployment:${evidence.intentId}:${evidence.token}`, evidence.repositoryId);
+  if (!lease) throw new Error("interrupted deployment has no matching active lease");
+  const intent = db
     .prepare(
       `SELECT id, repository_id, phase, previous_manifest, target_manifest, merge_sha, tree_hash
-       FROM deploy_intents
-       WHERE phase IN ('activating', 'prepared')
-       ORDER BY created_at`,
+     FROM deploy_intents WHERE id = ? AND repository_id = ? AND phase IN ('activating', 'prepared')`,
     )
-    .all() as Array<{
-    id: string;
-    repository_id: string;
-    phase: string;
-    previous_manifest: string | null;
-    target_manifest: string | null;
-    merge_sha: string;
-    tree_hash: string;
-  }>;
-  const intent = open.length === 1 ? open[0] : undefined;
-  if (!intent) return open.length === 0 ? "idle" : fenceRestart(db, null);
+    .get(evidence.intentId, evidence.repositoryId) as
+    | {
+        id: string;
+        repository_id: string;
+        phase: string;
+        previous_manifest: string | null;
+        target_manifest: string | null;
+        merge_sha: string;
+        tree_hash: string;
+      }
+    | undefined;
+  if (!intent) throw new Error("interrupted deployment intent is not open");
   const observed = observe();
   if (observed.length > 0 && observed === intent.target_manifest) {
-    finishRestart(db, intent, "deployed", observed);
+    finishRestart(db, evidence, intent, "deployed", observed);
     return "finished";
   }
   if (
@@ -79,14 +102,15 @@ export function reconcileRestart(
     intent.previous_manifest !== null &&
     observed === intent.previous_manifest
   ) {
-    finishRestart(db, intent, "rolled-back", observed);
+    finishRestart(db, evidence, intent, "rolled-back", observed);
     return "rolled-back";
   }
-  return fenceRestart(db, intent);
+  return fenceRestart(db, evidence);
 }
 
 function finishRestart(
   db: Database,
+  evidence: RecoveryEvidence,
   intent: {
     id: string;
     repository_id: string;
@@ -98,11 +122,25 @@ function finishRestart(
   observed: string,
 ): void {
   const run = db.transaction(() => {
-    db.prepare("UPDATE deploy_intents SET phase = ?, manifest_hash = ? WHERE id = ?").run(
-      phase,
-      phase === "deployed" ? observed : null,
-      intent.id,
-    );
+    const lock = db
+      .prepare(
+        "SELECT token FROM deploy_fence WHERE id = 1 AND token = ? AND repository_id = ? AND intent_id = ? AND held = 1 AND fenced = 0",
+      )
+      .get(evidence.token, evidence.repositoryId, evidence.intentId);
+    const lease = db
+      .prepare(
+        "SELECT id FROM deploy_leases WHERE id = ? AND repository_id = ? AND kind = 'deployment' AND released = 0",
+      )
+      .get(`deployment:${evidence.intentId}:${evidence.token}`, evidence.repositoryId);
+    if (!lock || !lease)
+      throw new Error("interrupted deployment identity changed during observation");
+    const updated = db
+      .prepare(
+        "UPDATE deploy_intents SET phase = ?, manifest_hash = ? WHERE id = ? AND repository_id = ? AND phase IN ('activating', 'prepared')",
+      )
+      .run(phase, phase === "deployed" ? observed : null, intent.id, evidence.repositoryId);
+    if (updated.changes !== 1)
+      throw new Error("interrupted deployment intent changed during observation");
     db.prepare("INSERT INTO deploy_phases (intent_id, phase, at) VALUES (?, ?, ?)").run(
       intent.id,
       phase,
@@ -126,56 +164,47 @@ function finishRestart(
         observed,
       );
     }
-    releaseMatchingDeploymentLease(db, intent.repository_id, intent.id);
+    releaseMatchingDeploymentLease(db, evidence);
     db.prepare(
       `UPDATE deploy_fence
        SET held = 0, fenced = 0, reason = NULL
-       WHERE id = 1 AND repository_id = ? AND intent_id = ?`,
-    ).run(intent.repository_id, intent.id);
+       WHERE id = 1 AND token = ? AND repository_id = ? AND intent_id = ?`,
+    ).run(evidence.token, evidence.repositoryId, evidence.intentId);
   });
   run();
 }
 
-function fenceRestart(
-  db: Database,
-  intent: { id: string; repository_id: string } | null,
-): "fenced" {
+function fenceRestart(db: Database, evidence: RecoveryEvidence): "fenced" {
   const run = db.transaction(() => {
-    const fence = db.prepare("SELECT fenced FROM deploy_fence WHERE id = 1").get() as {
-      fenced: number;
-    };
-    if (fence.fenced === 1) return;
     db.prepare(
       `UPDATE deploy_fence
-       SET held = 1, fenced = 1, reason = ?, repository_id = COALESCE(?, repository_id), intent_id = COALESCE(?, intent_id)
-       WHERE id = 1`,
+       SET held = 1, fenced = 1, reason = ?
+       WHERE id = 1 AND token = ? AND repository_id = ? AND intent_id = ? AND held = 1 AND fenced = 0`,
     ).run(
       "restart observation does not match a durable manifest",
-      intent?.repository_id ?? null,
-      intent?.id ?? null,
+      evidence.token,
+      evidence.repositoryId,
+      evidence.intentId,
     );
   });
   run();
   return "fenced";
 }
 
-function releaseMatchingDeploymentLease(
-  db: Database,
-  repositoryId: string,
-  intentId: string,
-): void {
-  const rows = db
+function releaseMatchingDeploymentLease(db: Database, evidence: RecoveryEvidence): void {
+  const row = db
     .prepare(
-      `SELECT id FROM deploy_leases
-       WHERE repository_id = ? AND kind = 'deployment' AND released = 0 AND id LIKE ?`,
+      `SELECT id FROM deploy_leases WHERE id = ? AND repository_id = ? AND kind = 'deployment' AND released = 0`,
     )
-    .all(repositoryId, `deployment:${intentId}:%`) as Array<{ id: string }>;
-  for (const row of rows) {
+    .get(`deployment:${evidence.intentId}:${evidence.token}`, evidence.repositoryId) as
+    | { id: string }
+    | undefined;
+  if (row) {
     db.prepare(
       `UPDATE deploy_owners
        SET active_deploys = CASE WHEN active_deploys > 0 THEN active_deploys - 1 ELSE 0 END
        WHERE repository_id = ?`,
-    ).run(repositoryId);
+    ).run(evidence.repositoryId);
     db.prepare("UPDATE deploy_leases SET released = 1 WHERE id = ?").run(row.id);
   }
 }

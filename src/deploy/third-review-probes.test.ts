@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { generateKeyPairSync, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,6 +10,7 @@ import { migrate } from "../db/migrations.js";
 import type { RuntimeAdapter } from "./adapter.js";
 import { buildArtifactEnvelope } from "./artifact.js";
 import { advanceCandidate, blankCandidate } from "./candidate.js";
+import { recoverWithRuntimeAdapter } from "./cli.js";
 import { canonicalJson } from "./crypto.js";
 import { executeRelease, type RuntimeCallbacks } from "./executor.js";
 import type { GenesisAdapterRecord } from "./genesis.js";
@@ -388,27 +389,91 @@ describe("third review probes", () => {
         });
       },
     );
-    expect(exit.signal).toBe("SIGKILL");
+    expect(exit.signal === "SIGKILL" || (exit.signal === null && exit.code !== 0)).toBe(true);
+    expect(fs.readFileSync(copyPath, "utf8")).toBe("payload-v1\n");
     const copies = fs.readFileSync(counterPath, "utf8").trim().split("\n").filter(Boolean);
     expect(copies).toEqual(["copy"]);
     const db = new DatabaseConstructor(dbPath);
     db.pragma("busy_timeout = 5000");
     const reopened = openDeployJournal(db);
     expect(reopened.activeDeploymentLease("repo-a")).toBe(true);
-    const target = db
-      .prepare("SELECT target_manifest FROM deploy_intents WHERE id = ?")
-      .get("intent-crash") as { target_manifest: string | null };
-    const recovery = (await import("./recovery.js")) as {
-      reconcileRestart?: (database: DatabaseConstructor.Database, observe: () => string) => string;
+    expect(
+      db
+        .prepare(
+          "SELECT token, held, fenced, repository_id, intent_id FROM deploy_fence WHERE id = 1",
+        )
+        .get(),
+    ).toMatchObject({
+      token: 4,
+      held: 1,
+      fenced: 0,
+      repository_id: "repo-a",
+      intent_id: "intent-crash",
+    });
+    reopened.seedOwner(owner("repo-b", 1, false, "legacy"));
+    reopened.applyDecision({ ...intent("other"), repositoryId: "repo-b" });
+    const wrongEvidence = { repositoryId: "repo-a", intentId: "intent-crash", token: 5 };
+    expect(reopened.reconcileInterrupted(wrongEvidence, () => "wrong")).toBe("idle");
+    expect(
+      reopened.reconcileInterrupted(
+        { repositoryId: "repo-b", intentId: "intent-crash", token: 4 },
+        () => "wrong",
+      ),
+    ).toBe("idle");
+    const unconfigured = createDeploymentService({
+      host: "omarchy",
+      publicKey,
+      journal: reopened,
+      freshMerges: () => [],
+      execute: () => ({ status: "pending" }),
+    });
+    expect(() => unconfigured.tick("repo-a")).toThrow("trusted runtime observer is not configured");
+    expect(reopened.activeDeploymentLease("repo-a")).toBe(true);
+    expect(reopened.intentRecord("intent-crash")?.phase).toBe("activating");
+    const observedRuntime = () => {
+      const sha256 = createHash("sha256").update(fs.readFileSync(copyPath)).digest("hex");
+      return createHash("sha256")
+        .update(JSON.stringify([{ path: "src/app.py", mode: 0o100644, sha256 }]))
+        .digest("hex");
     };
-    expect(typeof recovery.reconcileRestart).toBe("function");
-    const reconcileRestart = recovery.reconcileRestart;
-    if (!reconcileRestart) return;
-    expect(reconcileRestart(db, () => target.target_manifest ?? "")).toBe("finished");
+    const service = createDeploymentService({
+      host: "omarchy",
+      publicKey,
+      journal: reopened,
+      freshMerges: () => [],
+      execute: () => ({ status: "pending" }),
+      runtimeObserverFor: (repositoryId: string) =>
+        repositoryId === "repo-a" ? hooks({ observe: observedRuntime }) : undefined,
+    });
+    expect(service.tick("repo-a")).toEqual({ decisions: 0, executions: 0 });
+    expect(reopened.intentRecord("intent-crash")?.phase).toBe("deployed");
+    expect(reopened.intentRecord("intent-other")?.phase).toBe("recorded");
     expect(reopened.activeDeploymentLease("repo-a")).toBe(false);
+    expect(db.prepare("SELECT held, fenced FROM deploy_fence WHERE id = 1").get()).toEqual({
+      held: 0,
+      fenced: 0,
+    });
     expect(reopened.tryAcquire(8, { repositoryId: "repo-a", intentId: "intent-crash" })).toBe(
       "acquired",
     );
+    reopened.retain(8, "operator recovery required");
+    const recoveryEvidence = { repositoryId: "repo-a", intentId: "intent-crash", token: 8 };
+    expect(() => recoverWithRuntimeAdapter(db, recoveryEvidence, undefined)).toThrow(
+      "trusted runtime observer is not configured",
+    );
+    expect(() =>
+      recoverWithRuntimeAdapter(db, recoveryEvidence, () =>
+        hooks({
+          runtimeTargetId: "other-runtime",
+          observe: observedRuntime,
+        }),
+      ),
+    ).toThrow("trusted runtime observer is not configured");
+    expect(
+      recoverWithRuntimeAdapter(db, recoveryEvidence, (repositoryId) =>
+        repositoryId === "repo-a" ? hooks({ observe: observedRuntime }) : undefined,
+      ),
+    ).toBe("cleared");
     expect(fs.readFileSync(counterPath, "utf8").trim().split("\n").filter(Boolean)).toEqual([
       "copy",
     ]);
