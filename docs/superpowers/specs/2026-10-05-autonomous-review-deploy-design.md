@@ -35,6 +35,10 @@ targets.
    prevents conflicting deployments, and opens a linked repair workflow.
 8. Live business activity continues when the review computer is offline. Review
    work remains durably queued.
+9. A reviewed PR may intentionally change application behavior, schedules,
+   prompts, quantities, targets, or enabled states. The system exposes and tests
+   that behavior diff; it does not freeze current behavior merely because the
+   change affects production automation.
 
 ## Non-goals
 
@@ -46,6 +50,21 @@ targets.
   database mutations during rollback.
 - Claiming two independent human identities when logical agents share one GitHub
   account.
+
+## Behavior-change authority
+
+The deployment system separates **protected production data** from **intentional
+application behavior**. Secrets, customer/runtime state, and arbitrary commands
+remain forbidden. Behavior-changing source or declarative configuration is a
+normal deployable artifact when the PR explicitly scopes it, offline tests cover
+it, both agents approve the exact candidate, the plain-English merge summary
+states the before/after behavior, and the operator merges it.
+
+Tests, dry runs, and deployment verification never actuate business actions.
+After deployment, the normal production jobs enact the newly merged behavior.
+The one-time infrastructure cutover preserves existing behavior only to avoid
+accidental changes during migration; it is not a permanent restriction on later
+PRs.
 
 ## Topology
 
