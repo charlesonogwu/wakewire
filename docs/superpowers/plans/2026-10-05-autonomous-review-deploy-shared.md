@@ -381,7 +381,7 @@ git commit -m "feat: execute fenced automatic deployments"
 
 - [ ] **Step 1: Write failing CLI safety tests**
 
-Test default dry-run, no merge command, no arbitrary repo/path/command parameters, redacted status, explicit recovery token, refusal to clear an unverified fence, one-time genesis consumption, stale owner generation, drain-state refusal, and proof that no live merge scan or activation occurs while `deploymentActivationEnabled` is false.
+Test default dry-run, no merge command, no arbitrary repo/path/command parameters, redacted status, explicit recovery token, refusal to clear an unverified fence, one-time genesis consumption, stale owner generation, drain-state refusal, proof that no activation occurs while `deploymentActivationEnabled` is false, and an exact merge intent journaled while disabled executing exactly once after the gate is enabled.
 
 - [ ] **Step 2: Prove red**
 
