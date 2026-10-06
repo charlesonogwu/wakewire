@@ -122,6 +122,20 @@ enabling `workspace-write` on anything.
 - wakewire never reads or writes Codex's internal SQLite state; it only uses
   documented CLI/SDK/app-server surfaces.
 
+## Autonomous deployment
+
+Deployment activation is off by default. A signed owner record must name the
+stable host and set `deploymentActivationEnabled` before a fresh GitHub scan can
+create a deployment intent. While the gate is off, signed events are stored as
+deduplicated receipts only. The daemon does not scan merges or activate
+artifacts. The deploy command has no merge action and accepts no repository,
+path, or shell command. Recovery clears a fence only when the repository, intent,
+and token match that fenced transaction and a fixed runtime observer reports the
+journaled manifest. A caller-supplied hash cannot clear a fence. It does not clear
+another repository or a lock that is only held. Clearing the fence does not
+approve or redeploy a release. Dry-run uses the placeholder repository
+`example/one` and does not contact a runtime.
+
 ## Reporting
 
 Open a GitHub security advisory or email the maintainer. Please don't file prompt

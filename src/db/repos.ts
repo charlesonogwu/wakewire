@@ -4,6 +4,9 @@ import type { WakeEvent } from "../core/event.js";
 import { WakeEventSchema } from "../core/event.js";
 import type { Route, RouteInput, RouteTarget, SandboxPolicy } from "../core/route.js";
 
+/** Deployment intent state lives in deploy_* tables, never in the legacy queue. */
+export const LEGACY_QUEUE_TABLES = ["deliveries", "routes"] as const;
+
 export type DeliveryStatus =
   | "received"
   | "queued"

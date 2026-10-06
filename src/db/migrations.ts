@@ -131,6 +131,176 @@ const MIGRATIONS: ReadonlyArray<{
       CREATE INDEX captures_source ON captures (source_id, received_at);
     `,
   },
+  {
+    version: 5,
+    name: "deploy-journal",
+    sql: `
+      CREATE TABLE deploy_intents (
+        id TEXT PRIMARY KEY,
+        delivery_id TEXT NOT NULL UNIQUE,
+        repository_id TEXT NOT NULL,
+        merge_sha TEXT NOT NULL,
+        tree_hash TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        manifest_hash TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE deploy_phases (
+        intent_id TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        at TEXT NOT NULL
+      );
+      CREATE TABLE deploy_pauses (
+        repository_id TEXT PRIMARY KEY,
+        repair_id TEXT NOT NULL,
+        notice TEXT NOT NULL
+      );
+      CREATE TABLE deploy_outbox (
+        id TEXT PRIMARY KEY,
+        intent_id TEXT,
+        kind TEXT NOT NULL,
+        acknowledged INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE deploy_fence (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        token INTEGER NOT NULL,
+        held INTEGER NOT NULL,
+        fenced INTEGER NOT NULL,
+        reason TEXT
+      );
+      INSERT INTO deploy_fence (id, token, held, fenced, reason) VALUES (1, 0, 0, 0, NULL);
+      CREATE TABLE deploy_owners (
+        repository_id TEXT PRIMARY KEY,
+        owner TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        deployment_activation_enabled INTEGER NOT NULL,
+        active_jobs INTEGER NOT NULL DEFAULT 0,
+        active_deploys INTEGER NOT NULL DEFAULT 0,
+        signature TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE deploy_raw_receipts (
+        delivery_id TEXT PRIMARY KEY,
+        repository_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        event_id TEXT NOT NULL
+      );
+      CREATE TABLE deploy_merges (
+        repository_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        merge_sha TEXT NOT NULL,
+        PRIMARY KEY (repository_id, event_id)
+      );
+      CREATE TABLE deploy_dispositions (
+        repository_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        disposition TEXT NOT NULL,
+        PRIMARY KEY (repository_id, event_id)
+      );
+      CREATE TABLE deploy_cursors (
+        repository_id TEXT PRIMARY KEY,
+        sequence INTEGER NOT NULL
+      );
+      CREATE TABLE deploy_genesis (
+        repository_id TEXT PRIMARY KEY,
+        merge_event_id TEXT NOT NULL,
+        target_generation INTEGER NOT NULL
+      );
+    `,
+  },
+  {
+    version: 6,
+    name: "deploy-fencing",
+    sql: `
+      ALTER TABLE deploy_intents ADD COLUMN previous_manifest TEXT;
+      ALTER TABLE deploy_intents ADD COLUMN target_manifest TEXT;
+      ALTER TABLE deploy_intents ADD COLUMN repair_id TEXT;
+      ALTER TABLE deploy_fence ADD COLUMN repository_id TEXT;
+      ALTER TABLE deploy_fence ADD COLUMN intent_id TEXT;
+      ALTER TABLE deploy_owners ADD COLUMN pinned_key_id TEXT;
+      ALTER TABLE deploy_genesis ADD COLUMN adapter_digest TEXT;
+      ALTER TABLE deploy_genesis ADD COLUMN adapter_version TEXT;
+      ALTER TABLE deploy_outbox ADD COLUMN delivered INTEGER NOT NULL DEFAULT 0;
+      CREATE TABLE deploy_leases (
+        id TEXT PRIMARY KEY,
+        repository_id TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        released INTEGER NOT NULL DEFAULT 0
+      );
+    `,
+  },
+  {
+    version: 7,
+    name: "deploy-trust",
+    sql: `
+      CREATE TABLE deploy_trust_keys (
+        key_id TEXT PRIMARY KEY,
+        public_pem TEXT NOT NULL
+      );
+      CREATE TABLE deploy_adapters (
+        digest TEXT PRIMARY KEY,
+        version TEXT NOT NULL,
+        repository_id TEXT NOT NULL,
+        body TEXT NOT NULL
+      );
+      CREATE TABLE deploy_previous_files (
+        intent_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        bytes BLOB NOT NULL,
+        PRIMARY KEY (intent_id, path)
+      );
+      CREATE TABLE deploy_wakes (
+        request_id TEXT PRIMARY KEY,
+        repository_id TEXT NOT NULL,
+        lane_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        pr INTEGER NOT NULL,
+        head_sha TEXT NOT NULL,
+        base_sha TEXT NOT NULL,
+        tree_hash TEXT NOT NULL
+      );
+    `,
+  },
+  {
+    version: 8,
+    name: "deploy-reconciliation",
+    sql: `
+      ALTER TABLE deploy_intents ADD COLUMN head_sha TEXT;
+      ALTER TABLE deploy_intents ADD COLUMN base_sha TEXT;
+      ALTER TABLE deploy_intents ADD COLUMN pr INTEGER;
+      ALTER TABLE deploy_outbox ADD COLUMN repository_id TEXT;
+      ALTER TABLE deploy_outbox ADD COLUMN merge_sha TEXT;
+      ALTER TABLE deploy_outbox ADD COLUMN tree_hash TEXT;
+      ALTER TABLE deploy_outbox ADD COLUMN manifest_hash TEXT;
+      ALTER TABLE deploy_wakes ADD COLUMN delivered INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE deploy_wakes ADD COLUMN holder TEXT;
+      CREATE TABLE deploy_tokens (
+        repository_id TEXT PRIMARY KEY,
+        token INTEGER NOT NULL
+      );
+      CREATE TABLE deploy_previous_manifests (
+        intent_id TEXT PRIMARY KEY,
+        paths_json TEXT NOT NULL
+      );
+    `,
+  },
+  {
+    version: 9,
+    name: "deploy-restart-fence-evidence",
+    sql: `
+      CREATE TABLE deploy_restart_fences (
+        intent_id TEXT PRIMARY KEY,
+        repository_id TEXT NOT NULL,
+        token INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        observed_manifest TEXT NOT NULL,
+        at TEXT NOT NULL
+      );
+    `,
+  },
 ];
 
 /** targetVersion is for tests that need to exercise upgrade paths from older schemas. */

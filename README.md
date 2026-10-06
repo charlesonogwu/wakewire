@@ -171,6 +171,27 @@ the delivery log is plain SQLite you can export. We'll ship a migration note wit
 whatever the native feature turns out to be, and deprecate overlapping sources
 rather than compete.
 
+## Autonomous deployment dry run
+
+Deployment activation stays off until a signed owner record names a stable host
+and sets `deploymentActivationEnabled`. The public commands are:
+
+```bash
+wakewire deploy dry-run
+wakewire deploy status
+wakewire deploy recover --repository <id> --intent <id> --token <token>
+```
+
+`dry-run` uses the synthetic repository `example/one` and an in-memory journal.
+It does not read a private registry, merge a pull request, or copy files onto a
+runtime. `status` reports owner, phase, generation, and whether activation is
+enabled, and it removes signatures and tokens. `recover` clears a fence only when
+the repository, intent, and token match that fenced transaction and the host's
+fixed runtime observer reports the journaled manifest. A caller-supplied hash is
+rejected. It does not clear another repository or a lock that is merely held.
+Clearing a fence does not deploy or enable activation. There is no merge command.
+Private adapters, runtime paths, and repository names stay outside this package.
+
 ## Non-goals (v1)
 
 No cloud/hosted component, no web dashboard, no writing to Codex's internal

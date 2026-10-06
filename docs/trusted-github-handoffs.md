@@ -177,3 +177,14 @@ Received events are durably queued. Events GitHub could not deliver while the
 receiver was offline require explicit reconciliation; do not assume automatic
 GitHub redelivery. Likewise, an uncertain Desktop acceptance requires inspection,
 not deleting its receipt and retrying blindly.
+
+## Deployment is not a webhook command
+
+A trusted comment, review, or check can be stored as a signed receipt. It does
+not merge, deploy, or enable activation. Merge remains an operator action on
+GitHub. After an owner compare-and-swap enables activation, the coordinator
+reads fresh GitHub state instead of trusting the stored receipt. The dry-run
+command uses the placeholder repository `example/one`. The recovery command
+accepts the fenced repository, intent, and token. The observed runtime comes from
+the host's fixed observer, never from a caller-supplied manifest hash.
+Neither command takes a repository path, shell command, or merge flag.

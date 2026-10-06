@@ -19,6 +19,15 @@ import { loadConfig } from "./config.js";
 import { runDaemon } from "./daemon/daemon.js";
 import { openDatabase } from "./db/db.js";
 import { createStores } from "./db/repos.js";
+import {
+  dispatchDeploy,
+  readDeployStatus,
+  recoverWithRuntimeAdapter,
+  renderStatus,
+  runDryRun,
+  type StatusRepository,
+} from "./deploy/cli.js";
+import { configuredRuntimeObserverFor } from "./deploy/runtime-observer.js";
 import { createLogger } from "./logging.js";
 import { runMcpServer } from "./mcp/server.js";
 import { logFilePath, wakewireHome } from "./paths.js";
@@ -251,6 +260,38 @@ program
   .description("Run the wakewire MCP server on stdio (used by the Codex plugin)")
   .action(async () => {
     await runMcpServer();
+  });
+
+program
+  .command("deploy")
+  .description("Read deployment status, run a synthetic dry run, or recover a verified fence")
+  .argument("[action]", "status, dry-run, or recover", "dry-run")
+  .option("--repository <id>", "fenced repository id")
+  .option("--intent <id>", "fenced intent id")
+  .option("--token <token>", "fenced lock token")
+  .action((action: string, options: { repository?: string; intent?: string; token?: string }) => {
+    const argv = [action];
+    if (options.repository) argv.push("--repository", options.repository);
+    if (options.intent) argv.push("--intent", options.intent);
+    if (options.token) argv.push("--token", options.token);
+    const db = action === "dry-run" ? null : openDatabase();
+    try {
+      const result = dispatchDeploy(argv, {
+        dryRun: () => runDryRun(),
+        recover: (evidence) => {
+          if (!db) throw new Error("recovery requires the local journal");
+          return recoverWithRuntimeAdapter(db, evidence, configuredRuntimeObserverFor);
+        },
+        status: () => (db ? readDeployStatus(db) : { repositories: [] }),
+      });
+      console.log(
+        action === "status"
+          ? renderStatus(result as { repositories: StatusRepository[] })
+          : JSON.stringify(result),
+      );
+    } finally {
+      db?.close();
+    }
   });
 
 program.parseAsync().catch((err) => {
