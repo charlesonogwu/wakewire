@@ -34,7 +34,12 @@ describe("genesis", () => {
       verifyGenesisAdapterRecord(valid, publicKey, new Set([valid.mergeEventId])),
     ).toThrow(/reused/);
     expect(() =>
-      verifyGenesisAdapterRecord(record({ repositoryId: "repo-b" }), publicKey, new Set(), "repo-a"),
+      verifyGenesisAdapterRecord(
+        record({ repositoryId: "repo-b" }),
+        publicKey,
+        new Set(),
+        "repo-a",
+      ),
     ).toThrow(/repository/);
   });
 

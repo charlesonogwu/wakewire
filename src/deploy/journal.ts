@@ -38,6 +38,7 @@ export interface DeployJournal {
   enqueueReceipt(id: string, intentId: string | null, kind: string): void;
   acknowledge(receiptId: string): void;
   pendingReceipts(): string[];
+  receipt(id: string): { kind: string; acknowledged: boolean } | null;
   tryAcquire(token: number): FenceResult;
   release(token: number): void;
   retain(token: number, reason: string): void;
@@ -138,6 +139,12 @@ export function openDeployJournal(db: Database): DeployJournal {
           .prepare("SELECT id FROM deploy_outbox WHERE acknowledged = 0 ORDER BY rowid")
           .all() as Array<{ id: string }>
       ).map((row) => row.id);
+    },
+    receipt(id) {
+      const row = db.prepare("SELECT kind, acknowledged FROM deploy_outbox WHERE id = ?").get(id) as
+        | { kind: string; acknowledged: number }
+        | undefined;
+      return row ? { kind: row.kind, acknowledged: row.acknowledged === 1 } : null;
     },
     tryAcquire(token) {
       const state = readFence(db);
