@@ -273,7 +273,7 @@ export interface ArtifactEnvelope {
 }
 ```
 
-The initial adapter trust root is a one-time operator-signed record stored outside the executor and bound to repository ID, adapter digest/version, and the *target* owner generation of the planned cutover. The owner compare-and-swap is the sole consumer: it verifies and consumes that record in the same transaction that creates that generation, and the record is never accepted against the prior `legacy` generation. The executor only verifies that the consumed genesis record matches the active owner generation; it cannot consume, create, edit, or replace it. Every later adapter must be activated by a separate, already-trusted release.
+The initial adapter trust root is a one-time operator-signed record stored outside the executor and bound to repository ID, adapter digest/version, the exact operator-merged adapter-policy SHA/tree, its signed GitHub event cursor, and the *target* owner generation of the planned cutover. The owner compare-and-swap is the sole consumer: in one transaction it verifies/consumes genesis, records that adapter-policy merge as `bootstrap-consumed` (not a deployment decision), and advances the reconciliation cursor through that exact event. It cannot skip an unrelated event or application merge. The record is never accepted against the prior `legacy` generation. The executor only verifies that the consumed genesis record matches the active owner generation; it cannot consume, create, edit, or replace it. Every later adapter must be activated by a separate, already-trusted release.
 
 - [ ] **Step 4: Verify**
 
@@ -304,7 +304,7 @@ git commit -m "feat: sign immutable release artifacts"
 
 - [ ] **Step 1: Write migration and crash-recovery tests**
 
-Cover intent-before-mutation, process death during activation, lost acknowledgment, stale fencing token, repository pause, global uncertainty, linked repair release, `refuse` writing a pause without an intent, rejection of every direct fence-clear attempt, stale owner generation, target-generation genesis consumption, forward and reverse drain barriers, active transaction blocking ownership change, and uncertainty fence blocking rollback.
+Cover intent-before-mutation, process death during activation, lost acknowledgment, stale fencing token, repository pause, global uncertainty, linked repair release, `refuse` writing a pause without an intent, rejection of every direct fence-clear attempt, stale owner generation, target-generation genesis consumption, exact adapter-policy event becoming `bootstrap-consumed` without deploy/refuse, cursor advancement refusing to skip any intervening event, forward and reverse drain barriers, active transaction blocking ownership change, and uncertainty fence blocking rollback.
 
 - [ ] **Step 2: Prove red**
 
