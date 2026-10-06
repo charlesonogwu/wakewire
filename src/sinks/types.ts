@@ -21,6 +21,7 @@ export interface DeliveryResult {
 /**
  * The one seam between wakewire and any coding agent. v1 ships Codex
  * implementations only; a Claude Code adapter would implement this interface.
+ * Autonomous review wakes are not deliveries through this interface.
  */
 export interface AgentAdapter {
   readonly name: string;
