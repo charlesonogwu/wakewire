@@ -196,10 +196,13 @@ The loop ends in one of three durable states:
 Timeouts, exhausted model budgets, unavailable machines, and unknown outcomes
 never become approvals.
 
-Author and reviewer are separate T3 contexts mapped by repository policy. A
-business-facing Telegram Hermes may hold the reviewer role while its bounded
-source inspection and test tools execute on the review host. A coordinator model
-cannot impersonate both roles or manufacture the second verdict.
+Author and reviewer are separate T3 contexts on the review host, mapped by
+repository policy. The reviewer may be a dedicated Hermes review context, but it
+is not the production-credentialed Telegram Hermes process. Telegram Hermes is a
+request router and result presenter only. It may wake the dedicated reviewer and
+relay that reviewer's signed verdict, but it does not inspect untrusted source,
+run engineering tests, or cast the verdict itself. A coordinator model cannot
+impersonate both roles or manufacture the second verdict.
 
 ### 5. Plain-English readiness summary
 
@@ -236,17 +239,23 @@ If the merge method produces a different tree than the tested candidate, the
 deployment stops, fences that release, opens a linked repair job, and sends one
 operator notice. The merged code remains in GitHub; robots do not revert the
 default branch. The same response applies when any post-merge authorization
-check fails.
+check fails. The repository's release queue pauses immediately and may resume
+only for the linked reviewed repair release.
 
 ### 7. Automatic deployment
 
 A validated merge durably creates a deployment intent before changing runtime
-state. Busy and idle checks run before taking the global activation lock. A
-pending deployment does not prevent the other repository from becoming idle or
-preparing its artifact. Immediately before activation, the executor takes one
-Pi-wide lock with a fencing token, rechecks release ordering, and acquires the
-adapter-defined admission lease that prevents a new affected business job from
-starting. Only one activation or rollback may run at a time.
+state. An advisory busy check runs without a lock. When the affected service may
+become available, the executor acquires its adapter-defined scheduler admission
+lease, which prevents a new business job from starting, then rechecks that the
+service is idle while holding that lease. Only then may it acquire the Pi-wide
+activation lock with a fencing token and recheck release ordering. Lock
+acquisition is bounded and nonblocking: if the lease, idle recheck, activation
+lock, or ordering check is unavailable, the executor releases anything it holds
+and returns the deployment to pending unless runtime state is uncertain. Only
+activation and rollback hold the global lock. A pending deployment does not
+prevent the other repository from preparing its artifact or reaching its own
+idle window.
 
 The previously activated repository adapter supplies a trusted, versioned
 definition of:
