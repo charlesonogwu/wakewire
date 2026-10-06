@@ -41,7 +41,7 @@
 - Create: `src/deploy/lanes.test.ts`
 
 **Interfaces:**
-- Produces: `LaneRecord`, `RepositoryRegistry.load(path)`, `LaneRouter.route(event)`, and immutable repository/task identity types.
+- Produces: `LaneRecord`, `EngineeringOwnerRecord`, `RepositoryRegistry.load(path)`, `LaneRouter.route(event)`, and immutable repository/task identity types.
 - Consumes: an explicit registry path supplied by the trusted caller; no live-path default.
 
 - [ ] **Step 1: Write failing registry and routing tests**
@@ -55,6 +55,10 @@ it("rejects shared contexts and overlapping roots", () => {
 it("routes simultaneous repositories without context bleed", () => {
   expect(router.route(eventA).laneId).toBe("lane-a");
   expect(router.route(eventB).laneId).toBe("lane-b");
+});
+
+it("rejects a stale local owner flag", () => {
+  expect(() => router.admit(eventA, staleOwnerGeneration)).toThrow(/owner generation/);
 });
 ```
 
@@ -74,7 +78,18 @@ export interface LaneRecord {
   threads: Record<"author" | "reviewer", { projectId: string; threadId: string }>;
   adapterPath: string;
 }
+
+export interface EngineeringOwnerRecord {
+  repositoryId: string;
+  owner: "legacy" | "omarchy";
+  generation: number;
+  deploymentActivationEnabled: boolean;
+  updatedAt: string;
+  signature: string;
+}
 ```
+
+Both legacy and Omarchy coordinators read the same signed owner record before admitting engineering work. A local cache may only reduce reads; a stale generation cannot authorize work. Ownership rollback and disabling Omarchy activation are one compare-and-swap transition, not two machine-local changes.
 
 - [ ] **Step 4: Run focused verification**
 
@@ -225,14 +240,16 @@ git commit -m "feat: validate operator merges"
 - Create: `src/deploy/artifact.test.ts`
 - Create: `src/deploy/adapter.ts`
 - Create: `src/deploy/adapter.test.ts`
+- Create: `src/deploy/genesis.ts`
+- Create: `src/deploy/genesis.test.ts`
 
 **Interfaces:**
-- Produces: `buildArtifactEnvelope`, `verifyArtifactEnvelope`, and `RuntimeAdapterSchema`.
-- Consumes: actual merge tree, previously activated adapter version, an injected artifact byte source, and an injected signing provider.
+- Produces: `buildArtifactEnvelope`, `verifyArtifactEnvelope`, `RuntimeAdapterSchema`, and `verifyGenesisAdapterRecord`.
+- Consumes: actual merge tree, previously activated adapter version or one operator-written genesis adapter record, an injected artifact byte source, and an injected signing provider.
 
 - [ ] **Step 1: Write failing provenance tests**
 
-Test changed bytes after signing, wrong repository, wrong architecture/runtime, path traversal, duplicate files, symlinks, same-merge adapter update, unknown compatibility, and documentation-only artifacts.
+Test changed bytes after signing, wrong repository, wrong architecture/runtime, path traversal, duplicate files, symlinks, same-merge adapter update, unknown compatibility, documentation-only artifacts, missing genesis signature, reused genesis record, repository mismatch, and an executor attempting to create its own genesis trust.
 
 - [ ] **Step 2: Prove red**
 
@@ -255,6 +272,8 @@ export interface ArtifactEnvelope {
 }
 ```
 
+The initial adapter trust root is a one-time operator-signed record stored outside the executor and bound to repository ID, adapter digest/version, and owner generation. The executor may verify and consume that record exactly once; it cannot create, edit, or replace it. Every later adapter must be activated by a separate, already-trusted release.
+
 - [ ] **Step 4: Verify**
 
 Run: `npx vitest run src/deploy/artifact.test.ts src/deploy/adapter.test.ts && npm run typecheck`
@@ -263,7 +282,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/deploy/artifact.ts src/deploy/artifact.test.ts src/deploy/adapter.ts src/deploy/adapter.test.ts
+git add src/deploy/artifact.ts src/deploy/artifact.test.ts src/deploy/adapter.ts src/deploy/adapter.test.ts src/deploy/genesis.ts src/deploy/genesis.test.ts
 git commit -m "feat: sign immutable release artifacts"
 ```
 
@@ -279,12 +298,12 @@ git commit -m "feat: sign immutable release artifacts"
 - Modify: `src/db/repos.ts`
 
 **Interfaces:**
-- Produces: deployment-intent repository, receipt outbox, monotonic fencing tokens, and repository/global pause state.
+- Produces: deployment-intent repository, receipt outbox, monotonic fencing tokens, repository/global pause state, and the durable shared engineering-owner record.
 - Consumes: `MergeDecision` from Task 4. Only an `intent` may create a deployment intent. A `refuse` persists a repository pause and notice, and must never create a deployment intent.
 
 - [ ] **Step 1: Write migration and crash-recovery tests**
 
-Cover intent-before-mutation, process death during activation, lost acknowledgment, stale fencing token, repository pause, global uncertainty, linked repair release, `refuse` writing a pause without an intent, and rejection of every direct fence-clear attempt.
+Cover intent-before-mutation, process death during activation, lost acknowledgment, stale fencing token, repository pause, global uncertainty, linked repair release, `refuse` writing a pause without an intent, rejection of every direct fence-clear attempt, stale owner generation, and atomic owner rollback plus activation disable.
 
 - [ ] **Step 2: Prove red**
 
@@ -349,17 +368,19 @@ git commit -m "feat: execute fenced automatic deployments"
 **Files:**
 - Create: `src/deploy/cli.ts`
 - Create: `src/deploy/cli.test.ts`
+- Create: `src/deploy/service.ts`
+- Create: `src/deploy/service.test.ts`
 - Modify: `src/cli.ts`
 - Modify: `README.md`
 - Modify: `SECURITY.md`
 - Modify: `docs/trusted-github-handoffs.md`
 
 **Interfaces:**
-- Produces: read-only status, reconciliation, dry-run, and bounded operator recovery commands.
+- Produces: read-only status, dry-run, one default-off `deploymentActivationEnabled` service gate, one-time genesis bootstrap, and a separate bounded recovery command.
 
 - [ ] **Step 1: Write failing CLI safety tests**
 
-Test default dry-run, no merge command, no arbitrary repo/path/command parameters, redacted status, explicit recovery token, refusal to clear an unverified fence, and proof that neither CLI nor daemon performs a live merge scan or activation by default.
+Test default dry-run, no merge command, no arbitrary repo/path/command parameters, redacted status, explicit recovery token, refusal to clear an unverified fence, one-time genesis consumption, stale owner generation, and proof that no live merge scan or activation occurs while `deploymentActivationEnabled` is false.
 
 - [ ] **Step 2: Prove red**
 
@@ -368,7 +389,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement dry-run and documented cutover surfaces**
 
-Dry-run consumes synthetic repository IDs and artifacts only and may invoke the Task 7 executor solely through its dry-run adapter. Documentation uses placeholders and does not name private repositories or runtime paths. This task does not wire the live daemon; real scanning and activation remain disabled until an operator-approved adapter release and private-repository cutover.
+Dry-run consumes synthetic repository IDs and artifacts only and may invoke the Task 7 executor solely through its dry-run adapter. `DeploymentService.tick()` may call Task 4 `scan()` and store its `intent` or `refuse` result only when the shared owner record names this host and `deploymentActivationEnabled` is true; otherwise it is read-only. Private cutover code may change that single gate only through an owner-record compare-and-swap after the genesis adapter and synthetic dry run pass. The separate recovery command calls only `recover(observedManifest)` and has no scan, deploy, pause-clear, or activation-enable path. Documentation uses placeholders and does not name private repositories or runtime paths.
 
 - [ ] **Step 4: Run release-quality verification**
 
@@ -378,6 +399,6 @@ Expected: PASS and clean formatting.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/deploy/cli.ts src/deploy/cli.test.ts src/cli.ts README.md SECURITY.md docs/trusted-github-handoffs.md
+git add src/deploy/cli.ts src/deploy/cli.test.ts src/deploy/service.ts src/deploy/service.test.ts src/cli.ts README.md SECURITY.md docs/trusted-github-handoffs.md
 git commit -m "docs: add autonomous deployment dry run"
 ```
