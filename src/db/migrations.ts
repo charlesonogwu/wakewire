@@ -131,6 +131,85 @@ const MIGRATIONS: ReadonlyArray<{
       CREATE INDEX captures_source ON captures (source_id, received_at);
     `,
   },
+  {
+    version: 5,
+    name: "deploy-journal",
+    sql: `
+      CREATE TABLE deploy_intents (
+        id TEXT PRIMARY KEY,
+        delivery_id TEXT NOT NULL UNIQUE,
+        repository_id TEXT NOT NULL,
+        merge_sha TEXT NOT NULL,
+        tree_hash TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        manifest_hash TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE deploy_phases (
+        intent_id TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        at TEXT NOT NULL
+      );
+      CREATE TABLE deploy_pauses (
+        repository_id TEXT PRIMARY KEY,
+        repair_id TEXT NOT NULL,
+        notice TEXT NOT NULL
+      );
+      CREATE TABLE deploy_outbox (
+        id TEXT PRIMARY KEY,
+        intent_id TEXT,
+        kind TEXT NOT NULL,
+        acknowledged INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE deploy_fence (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        token INTEGER NOT NULL,
+        held INTEGER NOT NULL,
+        fenced INTEGER NOT NULL,
+        reason TEXT
+      );
+      INSERT INTO deploy_fence (id, token, held, fenced, reason) VALUES (1, 0, 0, 0, NULL);
+      CREATE TABLE deploy_owners (
+        repository_id TEXT PRIMARY KEY,
+        owner TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        deployment_activation_enabled INTEGER NOT NULL,
+        active_jobs INTEGER NOT NULL DEFAULT 0,
+        active_deploys INTEGER NOT NULL DEFAULT 0,
+        signature TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE deploy_raw_receipts (
+        delivery_id TEXT PRIMARY KEY,
+        repository_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        event_id TEXT NOT NULL
+      );
+      CREATE TABLE deploy_merges (
+        repository_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        merge_sha TEXT NOT NULL,
+        PRIMARY KEY (repository_id, event_id)
+      );
+      CREATE TABLE deploy_dispositions (
+        repository_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        disposition TEXT NOT NULL,
+        PRIMARY KEY (repository_id, event_id)
+      );
+      CREATE TABLE deploy_cursors (
+        repository_id TEXT PRIMARY KEY,
+        sequence INTEGER NOT NULL
+      );
+      CREATE TABLE deploy_genesis (
+        repository_id TEXT PRIMARY KEY,
+        merge_event_id TEXT NOT NULL,
+        target_generation INTEGER NOT NULL
+      );
+    `,
+  },
 ];
 
 /** targetVersion is for tests that need to exercise upgrade paths from older schemas. */
