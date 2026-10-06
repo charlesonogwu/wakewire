@@ -129,8 +129,9 @@ stable host and set `deploymentActivationEnabled` before a fresh GitHub scan can
 create a deployment intent. While the gate is off, signed events are stored as
 deduplicated receipts only. The daemon does not scan merges or activate
 artifacts. The deploy command has no merge action and accepts no repository,
-path, or shell command. Recovery accepts one observed manifest hash and clears
-the fence only when that hash matches the journal. Clearing the fence does not
+path, or shell command. Recovery clears a fence only when the repository, intent,
+token, and observed manifest all match that fenced transaction. It does not clear
+another repository or a lock that is only held. Clearing the fence does not
 approve or redeploy a release. Dry-run uses the placeholder repository
 `example/one` and does not contact a runtime.
 

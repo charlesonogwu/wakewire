@@ -65,9 +65,10 @@ export type MergeDecision =
   | {
       kind: "intent";
       repositoryId: string;
-      repairId: null;
+      repairId: string | null;
       notice: null;
       deliveryId: string;
+      eventId?: string;
       mergeSha: string;
       treeHash: string;
       headSha: string;
@@ -80,6 +81,7 @@ export type MergeDecision =
       repairId: string;
       notice: string;
       deliveryId: string;
+      eventId?: string;
     };
 
 export interface ArtifactFile {

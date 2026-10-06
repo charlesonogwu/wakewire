@@ -7,6 +7,7 @@ import { type ExecuteRequest, executeRelease } from "./executor.js";
 import type { GenesisAdapterRecord } from "./genesis.js";
 import { openDeployJournal } from "./journal.js";
 import type { FreshMerge } from "./reconcile.js";
+import type { RecoveryEvidence } from "./recovery.js";
 import { createDeploymentService } from "./service.js";
 import type { EngineeringOwnerRecord } from "./types.js";
 
@@ -23,7 +24,7 @@ export interface StatusRepository {
 
 export interface DeployCliDeps {
   dryRun: () => { repositoryId: "example/one"; status: "nothing-to-deploy"; writes: number };
-  recover: (observedManifest: string) => "cleared" | "fenced";
+  recover: (evidence: RecoveryEvidence) => "cleared" | "fenced";
   status: () => { repositories: StatusRepository[] };
 }
 
@@ -43,16 +44,7 @@ export function dispatchDeploy(argv: readonly string[], deps: DeployCliDeps): un
     return JSON.parse(renderStatus(deps.status())) as unknown;
   }
   if (action === "recover") {
-    const manifest = rest[1];
-    if (
-      rest.length !== 2 ||
-      rest[0] !== "--manifest" ||
-      !manifest ||
-      !/^[0-9a-f]{64}$/.test(manifest)
-    ) {
-      throw new Error("recovery requires one observed manifest");
-    }
-    return { status: deps.recover(manifest) };
+    return { status: deps.recover(parseRecover(rest)) };
   }
   throw new Error(`unsupported deploy action: ${action ?? ""}`);
 }
@@ -165,6 +157,36 @@ export function runDryRun(): {
   return { repositoryId, status: outcome.status, writes };
 }
 
+function parseRecover(rest: readonly string[]): RecoveryEvidence {
+  const values = new Map<string, string>();
+  for (let index = 0; index < rest.length; index += 2) {
+    const flag = rest[index];
+    const value = rest[index + 1];
+    if (!flag || !value || value.startsWith("--")) {
+      throw new Error("recovery requires repository, intent, token, and observed manifest");
+    }
+    values.set(flag, value);
+  }
+  const repositoryId = values.get("--repository");
+  const intentId = values.get("--intent");
+  const tokenText = values.get("--token");
+  const observedManifest = values.get("--manifest");
+  const token = Number(tokenText);
+  if (
+    values.size !== 4 ||
+    !repositoryId ||
+    !intentId ||
+    !tokenText ||
+    !Number.isInteger(token) ||
+    token <= 0 ||
+    !observedManifest ||
+    !/^[0-9a-f]{64}$/.test(observedManifest)
+  ) {
+    throw new Error("recovery requires repository, intent, token, and observed manifest");
+  }
+  return { repositoryId, intentId, token, observedManifest };
+}
+
 function ownerRecord(
   privateKey: KeyObject,
   body: Omit<EngineeringOwnerRecord, "signature">,
@@ -207,6 +229,9 @@ function sampleMerge(repositoryId: string): FreshMerge {
     reviewedTreeHash: "c".repeat(40),
     mergeSha: "e".repeat(40),
     newerReleaseActivated: false,
+    authorApproved: true,
+    reviewerApproved: true,
+    checks: "success",
   };
 }
 
@@ -233,6 +258,8 @@ function dryArtifact(
     }),
     bytes: new Map(),
     expected: { architecture: "x64", runtimeVersions: { node: "20" }, repositoryId },
+    adapterDigest: "d".repeat(64),
+    adapterPolicy: { allow: ["docs/"], deny: [] },
     adapterRollback: "files",
     callbacks: {
       busy: () => false,

@@ -15,6 +15,11 @@ export interface FreshMerge {
   reviewedTreeHash: string;
   mergeSha: string;
   newerReleaseActivated: boolean;
+  authorApproved?: boolean;
+  reviewerApproved?: boolean;
+  checks?: "success" | "pending" | "failed" | "cancelled" | "unknown";
+  eventId?: string;
+  repairId?: string | null;
 }
 
 export function scanMerge(
@@ -50,12 +55,20 @@ function decide(merge: FreshMerge): MergeDecision {
   if (merge.baseSha !== merge.reviewedBaseSha) return refuse("reviewed base moved");
   if (merge.treeHash !== merge.reviewedTreeHash) return refuse("merge tree mismatch");
   if (merge.newerReleaseActivated) return refuse("older release suppressed");
+  if (
+    merge.authorApproved !== true ||
+    merge.reviewerApproved !== true ||
+    merge.checks !== "success"
+  ) {
+    return refuse("candidate approvals or checks are not current");
+  }
   return {
     kind: "intent",
     repositoryId: merge.repositoryId,
-    repairId: null,
+    repairId: merge.repairId ?? null,
     notice: null,
     deliveryId: merge.deliveryId,
+    ...(merge.eventId ? { eventId: merge.eventId } : {}),
     mergeSha: merge.mergeSha,
     treeHash: merge.treeHash,
     headSha: merge.headSha,

@@ -22,6 +22,9 @@ function merge(overrides: Partial<FreshMerge> = {}): FreshMerge {
     reviewedTreeHash: TREE,
     mergeSha: SHA_B,
     newerReleaseActivated: false,
+    authorApproved: true,
+    reviewerApproved: true,
+    checks: "success",
     ...overrides,
   };
 }

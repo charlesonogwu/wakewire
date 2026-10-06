@@ -69,11 +69,27 @@ describe("recover", () => {
       pr: 1,
     });
     journal.recordManifest("intent-d1", "manifest-hash");
-    expect(journal.tryAcquire(1)).toBe("acquired");
+    expect(journal.tryAcquire(1, { repositoryId: "repo-a", intentId: "intent-d1" })).toBe(
+      "acquired",
+    );
     journal.retain(1, "uncertain");
-    expect(recover(db, "repo-a", "other")).toBe("fenced");
+    expect(
+      recover(db, {
+        repositoryId: "repo-a",
+        intentId: "intent-d1",
+        token: 1,
+        observedManifest: "other",
+      }),
+    ).toBe("fenced");
     expect(journal.tryAcquire(2)).toBe("fenced");
-    expect(recover(db, "repo-a", "manifest-hash")).toBe("cleared");
+    expect(
+      recover(db, {
+        repositoryId: "repo-a",
+        intentId: "intent-d1",
+        token: 1,
+        observedManifest: "manifest-hash",
+      }),
+    ).toBe("cleared");
     expect(journal.tryAcquire(2)).toBe("acquired");
     expect(journal.intentId("recovery-must-not-create")).toBeNull();
   });

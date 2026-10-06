@@ -55,20 +55,9 @@ export function createDeploymentService(deps: DeploymentServiceDeps): Deployment
       }
       let decisions = 0;
       let executions = 0;
-      for (const decision of scan(deps.freshMerges(repositoryId))) {
-        if (decision.kind === "intent" && deps.journal.intentId(decision.deliveryId)) continue;
-        if (
-          decision.kind === "refuse" &&
-          deps.journal.pause(decision.repositoryId)?.repairId === decision.repairId
-        ) {
-          continue;
-        }
-        deps.journal.applyDecision(decision);
-        decisions += 1;
-        if (decision.kind !== "intent") continue;
+      const run = (decision: Extract<MergeDecision, { kind: "intent" }>, intentId: string) => {
         const built = deps.artifactFor?.(decision);
-        const intentId = deps.journal.intentId(decision.deliveryId);
-        deps.execute(
+        const result = deps.execute(
           built
             ? {
                 ...built,
@@ -81,7 +70,40 @@ export function createDeploymentService(deps: DeploymentServiceDeps): Deployment
               }
             : undefined,
         );
+        if (
+          result.status === "deployed" ||
+          result.status === "nothing-to-deploy" ||
+          result.status === "rolled-back" ||
+          result.status === "fenced"
+        ) {
+          deps.journal.markSettled(intentId, result.status);
+        }
         executions += 1;
+      };
+      for (const decision of scan(deps.freshMerges(repositoryId))) {
+        if (decision.kind === "intent") {
+          const existingId = deps.journal.intentId(decision.deliveryId);
+          const existing = existingId ? deps.journal.intentRecord(existingId) : null;
+          if (existing && !openPhase(existing.phase)) continue;
+          if (existing && existingId) {
+            run(decision, existingId);
+            deps.journal.advanceCursor(repositoryId);
+            continue;
+          }
+        }
+        if (
+          decision.kind === "refuse" &&
+          deps.journal.pause(decision.repositoryId)?.repairId === decision.repairId
+        ) {
+          continue;
+        }
+        deps.journal.applyDecision(decision);
+        decisions += 1;
+        deps.journal.advanceCursor(repositoryId);
+        if (decision.kind !== "intent") continue;
+        const intentId = deps.journal.intentId(decision.deliveryId);
+        if (!intentId) throw new Error("intent is required");
+        run(decision, intentId);
       }
       return { decisions, executions };
     },
@@ -101,4 +123,10 @@ export function createDeploymentService(deps: DeploymentServiceDeps): Deployment
       deps.journal.completeOwnerChange(change);
     },
   };
+}
+
+function openPhase(phase: string): boolean {
+  return (
+    phase === "recorded" || phase === "prepared" || phase === "activating" || phase === "pending"
+  );
 }

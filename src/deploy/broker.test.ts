@@ -10,7 +10,11 @@ describe("broker", () => {
         return { ok: true };
       },
     });
-    const broker = createBroker(transport);
+    const broker = createBroker(transport, {
+      owner: "example",
+      name: "one",
+      branches: ["review"],
+    });
     expect(Object.keys(broker).sort()).toEqual(["comment", "publishBranch", "status"]);
     await expect(transport.post("/pulls/7/merge", {})).rejects.toThrow(/merge forbidden/);
     await broker.comment({ owner: "example", name: "one", pr: 7, body: "hello" });
@@ -20,6 +24,7 @@ describe("broker", () => {
       name: "one",
       branch: "review",
       sha: "b".repeat(40),
+      role: "author",
     });
     expect(calls.some((call) => call.includes("merge"))).toBe(false);
   });

@@ -54,10 +54,13 @@ export function advanceCandidate(candidate: Candidate, event: CandidateEvent): C
 function invalidate(candidate: Candidate, patch: Partial<CandidateId>): Candidate {
   return {
     ...candidate,
-    id: { ...candidate.id, ...patch },
+    id: { ...candidate.id, ...patch, treeHash: "" },
     state: "invalidated",
     verdicts: [],
+    checks: "pending",
+    unresolvedFindings: 0,
     summaryId: null,
+    blockReason: null,
   };
 }
 

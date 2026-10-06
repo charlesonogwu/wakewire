@@ -12,15 +12,21 @@ export interface LaneRouter {
   admit(event: { repositoryId: string }, generation: number): void;
 }
 
+export interface LaneRouterOptions {
+  deploymentLeaseActive?: (repositoryId: string) => boolean;
+}
+
+type OwnerSource =
+  | EngineeringOwnerRecord
+  | ((repositoryId: string) => EngineeringOwnerRecord | null);
+
 export function createLaneRouter(
   lanes: LaneRecord[],
-  owner: EngineeringOwnerRecord,
+  owner: OwnerSource,
   publicKey: KeyObject,
+  options?: LaneRouterOptions,
 ): LaneRouter {
-  const { signature, ...body } = owner;
-  if (!verifySignature(body, signature, publicKey)) {
-    throw new Error("owner record signature is invalid");
-  }
+  if (typeof owner !== "function") assertOwnerSignature(owner, publicKey);
   const byRepo = new Map(lanes.map((lane) => [lane.repositoryId, lane]));
   const deliveries = new Map<string, string>();
 
@@ -40,15 +46,38 @@ export function createLaneRouter(
     },
     admit(event, generation) {
       const lane = byRepo.get(event.repositoryId);
-      if (!lane || lane.repositoryId !== owner.repositoryId) {
+      const record = resolveOwner(owner, event.repositoryId, publicKey);
+      if (!lane || !record || lane.repositoryId !== record.repositoryId) {
         throw new Error(`owner record does not cover ${event.repositoryId}`);
       }
-      if (generation !== owner.generation) {
+      if (options?.deploymentLeaseActive?.(event.repositoryId)) {
+        throw new Error("deployment lease is active");
+      }
+      if (generation !== record.generation) {
         throw new Error(`stale owner generation ${generation}`);
       }
-      if (owner.phase === "draining") {
+      if (record.phase === "draining") {
         throw new Error("draining: new engineering work is refused");
       }
     },
   };
+}
+
+function resolveOwner(
+  owner: OwnerSource,
+  repositoryId: string,
+  publicKey: KeyObject,
+): EngineeringOwnerRecord | null {
+  if (typeof owner !== "function") return owner;
+  const record = owner(repositoryId);
+  if (!record) return null;
+  assertOwnerSignature(record, publicKey);
+  return record;
+}
+
+function assertOwnerSignature(owner: EngineeringOwnerRecord, publicKey: KeyObject): void {
+  const { signature, ...body } = owner;
+  if (!verifySignature(body, signature, publicKey)) {
+    throw new Error("owner record signature is invalid");
+  }
 }

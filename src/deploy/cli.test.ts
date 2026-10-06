@@ -8,7 +8,7 @@ const deps = {
     status: "nothing-to-deploy" as const,
     writes: 0,
   }),
-  recover: (_manifest: string) => "cleared" as const,
+  recover: () => "cleared" as const,
   status: () => ({ repositories: [] }),
 };
 
@@ -77,17 +77,33 @@ describe("deploy cli", () => {
     const calls: string[] = [];
     const local = {
       ...deps,
-      recover: (manifest: string) => {
-        calls.push(manifest);
+      recover: (evidence: { observedManifest: string }) => {
+        calls.push(evidence.observedManifest);
         return "fenced" as const;
       },
     };
     const manifest = "ab".repeat(32);
-    expect(dispatchDeploy(["recover", "--manifest", manifest], local)).toEqual({
+    expect(
+      dispatchDeploy(
+        [
+          "recover",
+          "--repository",
+          "example/one",
+          "--intent",
+          "intent-1",
+          "--token",
+          "4",
+          "--manifest",
+          manifest,
+        ],
+        local,
+      ),
+    ).toEqual({
       status: "fenced",
     });
     expect(calls).toEqual([manifest]);
     expect(() => dispatchDeploy(["recover"], local)).toThrow(/manifest/);
+    expect(() => dispatchDeploy(["recover", "--manifest", manifest], local)).toThrow(/manifest/);
     expect(() => dispatchDeploy(["recover", "--manifest", manifest, "--clear"], local)).toThrow(
       /forbidden/,
     );

@@ -14,7 +14,14 @@ describe("renderOperatorSummary", () => {
       baseSha: SHA_A,
       treeHash: TREE,
     });
-    const ready = renderOperatorSummary({ ...candidate, state: "merge-ready" });
+    const facts = {
+      changes: "job count",
+      challenges: "none open",
+      tests: "unit passed",
+      risks: "reversible",
+      deploymentContents: "src/app.py",
+    };
+    const ready = renderOperatorSummary({ ...candidate, state: "merge-ready" }, undefined, facts);
     expect(ready.text).toContain("repo-a");
     expect(ready.text).toContain(SHA_A);
     expect(ready.text).toContain(TREE);
@@ -39,21 +46,38 @@ describe("renderOperatorSummary", () => {
   });
 
   it("marks a summary stale when the head moves", () => {
-    const rendered = renderOperatorSummary({
-      ...blankCandidate({
-        repositoryId: "repo-a",
-        pr: 1,
-        headSha: SHA_A,
-        baseSha: SHA_A,
-        treeHash: TREE,
-      }),
-      state: "merge-ready",
-      summaryId: "sum-1",
-    });
+    const rendered = renderOperatorSummary(
+      {
+        ...blankCandidate({
+          repositoryId: "repo-a",
+          pr: 1,
+          headSha: SHA_A,
+          baseSha: SHA_A,
+          treeHash: TREE,
+        }),
+        state: "merge-ready",
+        summaryId: "sum-1",
+      },
+      undefined,
+      {
+        changes: "job count",
+        challenges: "none open",
+        tests: "unit passed",
+        risks: "reversible",
+        deploymentContents: "src/app.py",
+      },
+    );
     expect(
       renderOperatorSummary(
         { ...rendered.candidate, id: { ...rendered.candidate.id, headSha: "d".repeat(40) } },
         "sum-1",
+        {
+          changes: "job count",
+          challenges: "none open",
+          tests: "unit passed",
+          risks: "reversible",
+          deploymentContents: "src/app.py",
+        },
       ).stale,
     ).toBe(true);
   });

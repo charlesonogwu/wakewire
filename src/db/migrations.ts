@@ -210,6 +210,28 @@ const MIGRATIONS: ReadonlyArray<{
       );
     `,
   },
+  {
+    version: 6,
+    name: "deploy-fencing",
+    sql: `
+      ALTER TABLE deploy_intents ADD COLUMN previous_manifest TEXT;
+      ALTER TABLE deploy_intents ADD COLUMN target_manifest TEXT;
+      ALTER TABLE deploy_intents ADD COLUMN repair_id TEXT;
+      ALTER TABLE deploy_fence ADD COLUMN repository_id TEXT;
+      ALTER TABLE deploy_fence ADD COLUMN intent_id TEXT;
+      ALTER TABLE deploy_owners ADD COLUMN pinned_key_id TEXT;
+      ALTER TABLE deploy_genesis ADD COLUMN adapter_digest TEXT;
+      ALTER TABLE deploy_genesis ADD COLUMN adapter_version TEXT;
+      ALTER TABLE deploy_outbox ADD COLUMN delivered INTEGER NOT NULL DEFAULT 0;
+      CREATE TABLE deploy_leases (
+        id TEXT PRIMARY KEY,
+        repository_id TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        released INTEGER NOT NULL DEFAULT 0
+      );
+    `,
+  },
 ];
 
 /** targetVersion is for tests that need to exercise upgrade paths from older schemas. */

@@ -74,6 +74,9 @@ function merged(deliveryId = "m1"): FreshMerge {
     reviewedTreeHash: "c".repeat(40),
     mergeSha: "d".repeat(40),
     newerReleaseActivated: false,
+    authorApproved: true,
+    reviewerApproved: true,
+    checks: "success",
   };
 }
 

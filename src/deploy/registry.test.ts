@@ -55,6 +55,7 @@ describe("loadRegistry", () => {
 
   it("rejects a registry that is not owner-only", () => {
     const file = writeRegistry([lane("lane-a", "/srv/lanes", "a")], 0o644);
-    expect(() => loadRegistry(file)).toThrow(/owner-only/);
+    const expected = process.platform === "win32" ? /linux-only/ : /owner-only/;
+    expect(() => loadRegistry(file)).toThrow(expected);
   });
 });

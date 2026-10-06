@@ -6,13 +6,20 @@ const ROLES: Role[] = ["author", "reviewer"];
 
 export function loadRegistry(registryPath: string): LaneRecord[] {
   const stat = fs.statSync(registryPath);
-  if ((stat.mode & 0o077) !== 0) {
-    throw new Error(`registry must be owner-only: ${registryPath}`);
-  }
   const parsed = JSON.parse(fs.readFileSync(registryPath, "utf8")) as { lanes?: LaneRecord[] };
   const lanes = parsed.lanes ?? [];
   assertIsolated(lanes);
+  assertOwnerOnly(stat, registryPath);
   return lanes;
+}
+
+function assertOwnerOnly(stat: fs.Stats, registryPath: string): void {
+  if (process.platform === "win32") {
+    throw new Error(`registry owner isolation is linux-only: ${registryPath}`);
+  }
+  if ((stat.mode & 0o077) !== 0) {
+    throw new Error(`registry must be owner-only: ${registryPath}`);
+  }
 }
 
 function assertIsolated(lanes: LaneRecord[]): void {
@@ -31,7 +38,7 @@ function assertIsolated(lanes: LaneRecord[]): void {
     }
     roots.push(lane.roots.checkout, lane.roots.worktree, lane.roots.cache);
   }
-  const normalized = roots.map((root) => path.resolve(root));
+  const normalized = roots.map((root) => canonicalRoot(root));
   for (let i = 0; i < normalized.length; i += 1) {
     for (let j = i + 1; j < normalized.length; j += 1) {
       const left = normalized[i];
@@ -46,4 +53,12 @@ function assertIsolated(lanes: LaneRecord[]): void {
       }
     }
   }
+}
+
+function canonicalRoot(root: string): string {
+  if (/^[A-Za-z]:[\\/]/.test(root) || root.startsWith("\\\\") || root.startsWith("//")) {
+    throw new Error(`windows absolute root ${root}`);
+  }
+  const normalized = path.posix.normalize(root.replaceAll("\\", "/"));
+  return path.resolve(normalized);
 }

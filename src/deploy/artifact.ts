@@ -38,7 +38,7 @@ export function buildArtifactEnvelope(input: ArtifactRequest): ArtifactEnvelope 
   const files: ArtifactFile[] = [];
   for (const file of input.files) {
     assertSafePath(file.path);
-    if ((file.mode & 0o170000) === 0o120000) throw new Error(`symlink forbidden: ${file.path}`);
+    assertRegularMode(file.mode, file.path);
     if (seen.has(file.path)) throw new Error(`duplicate file ${file.path}`);
     seen.add(file.path);
     if (REPO_ONLY.test(file.path)) continue;
@@ -71,7 +71,12 @@ export function verifyArtifactEnvelope(
   envelope: ArtifactEnvelope,
   bytes: ReadonlyMap<string, Buffer>,
   publicKey: KeyObject,
-  expected: { architecture: string; runtimeVersions: Record<string, string>; repositoryId: string },
+  expected: {
+    architecture: string;
+    runtimeVersions: Record<string, string>;
+    repositoryId: string;
+    policy?: { allow: string[]; deny: string[] };
+  },
 ): void {
   const { signature, ...body } = envelope;
   if (
@@ -85,6 +90,9 @@ export function verifyArtifactEnvelope(
     if (envelope.runtimeVersions[name] !== version) throw new Error(`wrong runtime ${name}`);
   }
   for (const file of envelope.files) {
+    assertSafePath(file.path);
+    assertRegularMode(file.mode, file.path);
+    if (expected.policy) assertPolicy(file.path, expected.policy);
     const payload = bytes.get(file.path);
     if (!payload) throw new Error(`missing bytes ${file.path}`);
     const actual = createHash("sha256").update(payload).digest("hex");
@@ -93,9 +101,32 @@ export function verifyArtifactEnvelope(
 }
 
 function assertSafePath(filePath: string): void {
+  if (
+    /^[A-Za-z]:[\\/]/.test(filePath) ||
+    filePath.startsWith("\\\\") ||
+    filePath.startsWith("//")
+  ) {
+    throw new Error(`windows absolute path ${filePath}`);
+  }
   if (filePath.startsWith("/") || filePath.includes("\\") || filePath.split("/").includes("..")) {
     throw new Error(`path traversal ${filePath}`);
   }
+}
+
+function assertRegularMode(mode: number, filePath: string): void {
+  if ((mode & 0o170000) === 0o120000) throw new Error(`symlink forbidden: ${filePath}`);
+  if ((mode & 0o170000) !== 0o100000) throw new Error(`special file mode forbidden: ${filePath}`);
+}
+
+function assertPolicy(filePath: string, policy: { allow: string[]; deny: string[] }): void {
+  const denied = policy.deny.some((rule) => pathMatches(filePath, rule));
+  const allowed = policy.allow.some((rule) => pathMatches(filePath, rule));
+  if (denied || !allowed) throw new Error(`adapter policy denied ${filePath}`);
+}
+
+function pathMatches(filePath: string, rule: string): boolean {
+  if (rule.endsWith("/")) return filePath.startsWith(rule);
+  return filePath === rule || filePath.startsWith(`${rule}/`);
 }
 
 function isAdapterPath(filePath: string): boolean {

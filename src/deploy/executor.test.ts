@@ -57,6 +57,18 @@ function readyJournal() {
     publicKey,
     rollback: false,
   });
+  journal.applyDecision({
+    kind: "intent",
+    repositoryId: "repo-a",
+    repairId: null,
+    notice: null,
+    deliveryId: "d1",
+    mergeSha: "c".repeat(40),
+    treeHash: "b".repeat(40),
+    headSha: "a".repeat(40),
+    baseSha: "b".repeat(40),
+    pr: 1,
+  });
   return { db, journal };
 }
 
@@ -116,7 +128,9 @@ describe("executeRelease", () => {
         repositoryId: "repo-a",
       },
       journal,
-      intentId: null,
+      intentId: "intent-d1",
+      adapterDigest: "d".repeat(64),
+      adapterPolicy: { allow: ["src/", "docs/"], deny: [] },
       adapterRollback: "files",
       callbacks: callbacks(log, { busy: () => true }),
       token: 1,
@@ -131,8 +145,8 @@ describe("executeRelease", () => {
     const previous = new Map([["src/app.py", Buffer.from("previous")]]);
     let restored: ReadonlyMap<string, Buffer> | undefined;
     const acquire = journal.tryAcquire.bind(journal);
-    journal.tryAcquire = (token: number) => {
-      const result = acquire(token);
+    journal.tryAcquire = (token: number, scope?: { repositoryId: string; intentId: string }) => {
+      const result = acquire(token, scope);
       if (result === "acquired") order.push("lock");
       return result;
     };
@@ -146,7 +160,9 @@ describe("executeRelease", () => {
         repositoryId: "repo-a",
       },
       journal,
-      intentId: null,
+      intentId: "intent-d1",
+      adapterDigest: "d".repeat(64),
+      adapterPolicy: { allow: ["src/", "docs/"], deny: [] },
       adapterRollback: "files",
       callbacks: callbacks(order, {
         previous: () => previous,
@@ -197,7 +213,9 @@ describe("executeRelease", () => {
         repositoryId: "repo-a",
       },
       journal,
-      intentId: null,
+      intentId: "intent-d1",
+      adapterDigest: "d".repeat(64),
+      adapterPolicy: { allow: ["src/", "docs/"], deny: [] },
       adapterRollback: "files",
       callbacks: callbacks(log),
       token: 4,
@@ -218,7 +236,9 @@ describe("executeRelease", () => {
         repositoryId: "repo-a",
       },
       journal,
-      intentId: null,
+      intentId: "intent-d1",
+      adapterDigest: "d".repeat(64),
+      adapterPolicy: { allow: ["src/", "docs/"], deny: [] },
       adapterRollback: "unsafe",
       callbacks: callbacks([], {
         write: () => {
@@ -246,7 +266,9 @@ describe("executeRelease", () => {
         repositoryId: "repo-a",
       },
       journal,
-      intentId: null,
+      intentId: "intent-d1",
+      adapterDigest: "d".repeat(64),
+      adapterPolicy: { allow: ["src/", "docs/"], deny: [] },
       adapterRollback: "files" as const,
       token: 7,
       receiptId: "r-once",
@@ -306,7 +328,9 @@ describe("executeRelease", () => {
           repositoryId: "repo-a",
         },
         journal,
-        intentId: null,
+        intentId: "intent-d1",
+        adapterDigest: "d".repeat(64),
+        adapterPolicy: { allow: ["src/", "docs/"], deny: [] },
         adapterRollback: "files",
         callbacks: callbacks([]),
         token: 3,
@@ -332,7 +356,9 @@ describe("executeRelease", () => {
         repositoryId: "repo-a",
       },
       journal,
-      intentId: null,
+      intentId: "intent-d1",
+      adapterDigest: "d".repeat(64),
+      adapterPolicy: { allow: ["src/", "docs/"], deny: [] },
       adapterRollback: "files",
       callbacks: callbacks([], {
         write: () => {
@@ -346,7 +372,9 @@ describe("executeRelease", () => {
               repositoryId: "repo-b",
             },
             journal,
-            intentId: null,
+            intentId: "intent-d-repo-b",
+            adapterDigest: "d".repeat(64),
+            adapterPolicy: { allow: ["src/", "docs/"], deny: [] },
             adapterRollback: "files",
             callbacks: callbacks(otherLog),
             token: 12,
@@ -378,7 +406,9 @@ describe("executeRelease", () => {
         repositoryId: "repo-a",
       },
       journal,
-      intentId: null,
+      intentId: "intent-d1",
+      adapterDigest: "d".repeat(64),
+      adapterPolicy: { allow: ["src/", "docs/"], deny: [] },
       adapterRollback: "unsafe",
       callbacks: callbacks([], {
         write: () => {
@@ -400,7 +430,9 @@ describe("executeRelease", () => {
         repositoryId: "repo-a",
       },
       journal,
-      intentId: null,
+      intentId: "intent-d1",
+      adapterDigest: "d".repeat(64),
+      adapterPolicy: { allow: ["src/", "docs/"], deny: [] },
       adapterRollback: "files",
       callbacks: callbacks([], {
         write: () => {
@@ -428,7 +460,9 @@ describe("executeRelease", () => {
         repositoryId: "repo-a",
       },
       journal,
-      intentId: null,
+      intentId: "intent-d1",
+      adapterDigest: "d".repeat(64),
+      adapterPolicy: { allow: ["src/", "docs/"], deny: [] },
       adapterRollback: "files",
       callbacks: callbacks([], {
         write: () => {
@@ -477,5 +511,17 @@ function adopt(journal: ReturnType<typeof readyJournal>["journal"], repositoryId
     }),
     publicKey,
     rollback: false,
+  });
+  journal.applyDecision({
+    kind: "intent",
+    repositoryId,
+    repairId: null,
+    notice: null,
+    deliveryId: `d-${repositoryId}`,
+    mergeSha: "c".repeat(40),
+    treeHash: "b".repeat(40),
+    headSha: "a".repeat(40),
+    baseSha: "b".repeat(40),
+    pr: 2,
   });
 }

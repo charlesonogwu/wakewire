@@ -92,6 +92,8 @@ describe("ReviewHostRouter", () => {
       laneId: request.laneId,
       role: request.role,
       requestId: "r2",
+      repositoryId: "repo-a",
+      pr: 7,
       decision: "approve" as const,
       headSha: request.headSha,
       baseSha: request.baseSha,

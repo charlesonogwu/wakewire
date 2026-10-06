@@ -179,16 +179,17 @@ and sets `deploymentActivationEnabled`. The public commands are:
 ```bash
 wakewire deploy dry-run
 wakewire deploy status
-wakewire deploy recover --manifest <64-hex-observed-manifest>
+wakewire deploy recover --repository <id> --intent <id> --token <token> --manifest <64-hex>
 ```
 
 `dry-run` uses the synthetic repository `example/one` and an in-memory journal.
 It does not read a private registry, merge a pull request, or copy files onto a
 runtime. `status` reports owner, phase, generation, and whether activation is
-enabled, and it removes signatures and tokens. `recover` compares one observed
-manifest with the journal and clears a fence only on an exact match. Clearing a
-fence does not deploy or enable activation. There is no merge command. Private
-adapters, runtime paths, and repository names stay outside this package.
+enabled, and it removes signatures and tokens. `recover` clears a fence only when
+the repository, intent, token, and observed manifest all match that fenced
+transaction. It does not clear another repository or a lock that is merely held.
+Clearing a fence does not deploy or enable activation. There is no merge command.
+Private adapters, runtime paths, and repository names stay outside this package.
 
 ## Non-goals (v1)
 

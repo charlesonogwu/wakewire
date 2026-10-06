@@ -185,5 +185,5 @@ not merge, deploy, or enable activation. Merge remains an operator action on
 GitHub. After an owner compare-and-swap enables activation, the coordinator
 reads fresh GitHub state instead of trusting the stored receipt. The dry-run
 command uses the placeholder repository `example/one`. The recovery command
-accepts only an observed manifest hash. Neither command takes a repository path,
-shell command, or merge flag.
+accepts the fenced repository, intent, token, and observed manifest together.
+Neither command takes a repository path, shell command, or merge flag.
