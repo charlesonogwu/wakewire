@@ -1,11 +1,24 @@
 import { generateKeyPairSync, sign } from "node:crypto";
 import path from "node:path";
+import DatabaseConstructor from "better-sqlite3";
 import { describe, expect, it } from "vitest";
+import { migrate } from "../db/migrations.js";
 import { canonicalJson } from "./crypto.js";
 import { createReviewHostRouter, type T3Transport } from "./t3.js";
 import type { LaneRecord } from "./types.js";
 
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+const authorKeys = generateKeyPairSync("ed25519");
+
+function routerDb() {
+  const db = new DatabaseConstructor(":memory:");
+  migrate(db);
+  return db;
+}
+
+function authority() {
+  return { author: authorKeys.publicKey, reviewer: publicKey };
+}
 
 function lane(): LaneRecord {
   return {
@@ -49,14 +62,14 @@ const request = {
 describe("ReviewHostRouter", () => {
   it("never delivers one work item to both role contexts", async () => {
     const client = transport();
-    const router = createReviewHostRouter([lane()], client, publicKey);
+    const router = createReviewHostRouter([lane()], client, authority(), { db: routerDb() });
     await router.wake(request);
     expect(client.sent).toEqual([{ threadId: "review-thread", requestId: "r1" }]);
   });
 
   it("rejects production tokens, dotenv text, unknown lanes, and duplicate requests", async () => {
     const client = transport();
-    const router = createReviewHostRouter([lane()], client, publicKey);
+    const router = createReviewHostRouter([lane()], client, authority(), { db: routerDb() });
     await expect(
       router.wake({ ...request, requestId: "tok", repositoryId: "ghp_secret" }),
     ).rejects.toThrow(/secret/);
@@ -72,12 +85,12 @@ describe("ReviewHostRouter", () => {
   it("rejects a shared author and reviewer thread", async () => {
     const shared = lane();
     shared.threads.author.threadId = shared.threads.reviewer.threadId;
-    const router = createReviewHostRouter([shared], transport(), publicKey);
+    const router = createReviewHostRouter([shared], transport(), authority(), { db: routerDb() });
     await expect(router.wake(request)).rejects.toThrow(/threadId/);
   });
 
   it("rejects an invalid verdict signature", async () => {
-    const router = createReviewHostRouter([lane()], transport(), publicKey);
+    const router = createReviewHostRouter([lane()], transport(), authority(), { db: routerDb() });
     await router.wake(request);
     expect(() =>
       router.ingestVerdict({
@@ -103,7 +116,7 @@ describe("ReviewHostRouter", () => {
     const signature = sign(null, Buffer.from(canonicalJson(body)), privateKey).toString(
       "base64url",
     );
-    const router = createReviewHostRouter([lane()], transport(), publicKey);
+    const router = createReviewHostRouter([lane()], transport(), authority(), { db: routerDb() });
     await router.wake({ ...request, requestId: "r2" });
     expect(router.ingestVerdict({ ...body, signature }).requestId).toBe("r2");
     expect(path.isAbsolute("/dev/null")).toBe(true);

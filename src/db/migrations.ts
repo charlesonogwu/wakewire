@@ -264,6 +264,29 @@ const MIGRATIONS: ReadonlyArray<{
       );
     `,
   },
+  {
+    version: 8,
+    name: "deploy-reconciliation",
+    sql: `
+      ALTER TABLE deploy_intents ADD COLUMN head_sha TEXT;
+      ALTER TABLE deploy_intents ADD COLUMN base_sha TEXT;
+      ALTER TABLE deploy_intents ADD COLUMN pr INTEGER;
+      ALTER TABLE deploy_outbox ADD COLUMN repository_id TEXT;
+      ALTER TABLE deploy_outbox ADD COLUMN merge_sha TEXT;
+      ALTER TABLE deploy_outbox ADD COLUMN tree_hash TEXT;
+      ALTER TABLE deploy_outbox ADD COLUMN manifest_hash TEXT;
+      ALTER TABLE deploy_wakes ADD COLUMN delivered INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE deploy_wakes ADD COLUMN holder TEXT;
+      CREATE TABLE deploy_tokens (
+        repository_id TEXT PRIMARY KEY,
+        token INTEGER NOT NULL
+      );
+      CREATE TABLE deploy_previous_manifests (
+        intent_id TEXT PRIMARY KEY,
+        paths_json TEXT NOT NULL
+      );
+    `,
+  },
 ];
 
 /** targetVersion is for tests that need to exercise upgrade paths from older schemas. */

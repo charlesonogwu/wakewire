@@ -1,4 +1,4 @@
-import { createHash, type KeyObject } from "node:crypto";
+import { createHash } from "node:crypto";
 import type { RuntimeAdapter } from "./adapter.js";
 import { verifyArtifactEnvelope } from "./artifact.js";
 import type { DeployJournal } from "./journal.js";
@@ -36,7 +36,6 @@ export interface RuntimeCallbacks {
 export interface ExecuteRequest {
   envelope: ArtifactEnvelope;
   bytes: ReadonlyMap<string, Buffer>;
-  publicKey: KeyObject;
   expected: { architecture: string; runtimeVersions: Record<string, string>; repositoryId: string };
   journal: DeployJournal;
   intentId: string | null;
@@ -86,20 +85,42 @@ export function executeRelease(input: ExecuteRequest): ExecuteResult {
   if (!consumed || !owner || consumed.targetGeneration !== owner.generation) {
     throw new Error("consumed genesis does not match the active owner generation");
   }
+  if (owner.phase !== "stable" || !owner.deploymentActivationEnabled) {
+    throw new Error("deployment activation is not enabled for the active owner");
+  }
   const adapter = input.journal.activatedAdapter(intent.repositoryId);
   if (!adapter || adapter.version !== input.envelope.adapterVersion) {
     throw new Error("adapter digest is not the active adapter");
   }
   const callbacks = requireCallbacks(input.callbacks, adapter);
-  if (input.replay) {
-    const existing = input.journal.receipt(input.receiptId);
-    if (existing) {
-      if (!existing.acknowledged && callbacks.deliverReceipt()) {
-        input.journal.acknowledge(input.receiptId);
-      }
-      const status = RECEIPT_STATUSES.find((item) => item === existing.kind);
-      if (status) return { status };
+  const manifestHash = hashFiles(input.envelope.files);
+  const existing = input.journal.receipt(input.receiptId);
+  if (existing) {
+    if (
+      (existing.intentId !== null && existing.intentId !== intentId) ||
+      (existing.repositoryId !== null && existing.repositoryId !== intent.repositoryId) ||
+      (existing.mergeSha !== null && existing.mergeSha !== intent.mergeSha) ||
+      (existing.treeHash !== null && existing.treeHash !== intent.treeHash) ||
+      (existing.manifestHash !== null && existing.manifestHash !== manifestHash)
+    ) {
+      throw new Error("unrelated receipt");
     }
+    if (!existing.acknowledged) {
+      try {
+        if (callbacks.deliverReceipt()) input.journal.acknowledge(input.receiptId);
+      } catch (error) {
+        throw new ReceiptDeliveryError(error instanceof Error ? error.message : "delivery failed");
+      }
+    }
+    if (
+      existing.kind === "deployed" ||
+      existing.kind === "nothing-to-deploy" ||
+      existing.kind === "rolled-back"
+    ) {
+      input.journal.markSettled(intentId, existing.kind);
+    }
+    const status = RECEIPT_STATUSES.find((item) => item === existing.kind);
+    if (status) return { status };
   }
   const pause = input.journal.pause(intent.repositoryId);
   if (pause && pause.repairId !== intent.repairId) {
@@ -132,15 +153,19 @@ export function executeRelease(input: ExecuteRequest): ExecuteResult {
       kind: "deployment",
     });
     gate.deploymentLeaseId = deploymentLeaseId;
-    verifyArtifactEnvelope(input.envelope, input.bytes, input.publicKey, {
-      architecture: adapter.architecture,
-      runtimeVersions: adapter.runtimeVersions,
-      repositoryId: intent.repositoryId,
-      policy: { allow: adapter.allow, deny: adapter.deny },
-    });
+    verifyArtifactEnvelope(
+      input.envelope,
+      input.bytes,
+      input.journal.trustKey(adapter.verificationKeyId),
+      {
+        architecture: adapter.architecture,
+        runtimeVersions: adapter.runtimeVersions,
+        repositoryId: intent.repositoryId,
+        policy: { allow: adapter.allow, deny: adapter.deny },
+      },
+    );
     if (input.envelope.files.length === 0) {
-      input.journal.enqueueReceipt(input.receiptId, intentId, "nothing-to-deploy");
-      if (callbacks.deliverReceipt()) input.journal.acknowledge(input.receiptId);
+      publishReceipt(input, intent, "nothing-to-deploy", manifestHash);
       input.journal.markSettled(intentId, "nothing-to-deploy");
       clearMatchingPause(input, intent.repairId);
       return { status: "nothing-to-deploy" };
@@ -160,7 +185,7 @@ export function executeRelease(input: ExecuteRequest): ExecuteResult {
       try {
         callbacks.write(input.envelope, input.bytes);
       } catch (error) {
-        return rollback(input, gate, adapter, error, previous);
+        return rollback(input, gate, adapter, error);
       }
     }
     try {
@@ -168,21 +193,20 @@ export function executeRelease(input: ExecuteRequest): ExecuteResult {
       if (!callbacks.verify()) throw new Error("reload verification failed");
       callbacks.afterMutation?.();
       input.journal.recordManifest(intentId, targetManifest);
-      input.journal.enqueueReceipt(input.receiptId, intentId, "deployed");
-      if (callbacks.deliverReceipt()) input.journal.acknowledge(input.receiptId);
+      publishReceipt(input, intent, "deployed", manifestHash);
       input.journal.markSettled(intentId, "deployed");
       clearMatchingPause(input, intent.repairId);
     } catch (error) {
+      if (error instanceof ReceiptDeliveryError) throw error;
       if (error instanceof Error && error.message === "reload verification failed") {
-        return rollback(input, gate, adapter, error, previous);
+        return rollback(input, gate, adapter, error);
       }
       gate.retained = true;
       input.journal.retain(
         input.token,
         error instanceof Error ? error.message : "uncertain activation",
       );
-      input.journal.enqueueReceipt(input.receiptId, intentId, "fenced");
-      if (callbacks.deliverReceipt()) input.journal.acknowledge(input.receiptId);
+      publishReceipt(input, intent, "fenced", manifestHash);
       return { status: "fenced" };
     }
     return { status: "deployed" };
@@ -203,23 +227,30 @@ function rollback(
   gate: Gate,
   adapter: RuntimeAdapter,
   error: unknown,
-  previous: ReadonlyMap<string, Buffer>,
 ): ExecuteResult {
   const intentId = input.intentId;
   if (!intentId) throw new Error("intent is required");
   const intent = input.journal.intentRecord(intentId);
   if (!intent) throw new Error("intent is required");
   const repairId = `repair-${input.receiptId}`;
+  const manifestHash = hashFiles(input.envelope.files);
+  const backup = input.journal.readBackup(intentId);
+  if (adapter.rollback !== "unsafe" && (!backup.recorded || !backup.complete)) {
+    gate.retained = true;
+    input.journal.retain(input.token, "incomplete backup set");
+    input.journal.pauseForRepair(intent.repositoryId, repairId, "incomplete backup set");
+    publishReceipt(input, intent, "fenced", manifestHash);
+    return { status: "fenced" };
+  }
   if (adapter.rollback === "unsafe") {
     gate.retained = true;
     input.journal.retain(input.token, error instanceof Error ? error.message : "unsafe rollback");
     input.journal.pauseForRepair(intent.repositoryId, repairId, "unsafe rollback requires repair");
-    input.journal.enqueueReceipt(input.receiptId, intentId, "fenced");
-    if (input.callbacks.deliverReceipt()) input.journal.acknowledge(input.receiptId);
+    publishReceipt(input, intent, "fenced", manifestHash);
     return { status: "fenced" };
   }
   try {
-    input.callbacks.restore(previous);
+    input.callbacks.restore(backup.files);
     if (!input.callbacks.verifyRestore()) throw new Error("restore verification failed");
   } catch (restoreError) {
     gate.retained = true;
@@ -228,8 +259,7 @@ function rollback(
       restoreError instanceof Error ? restoreError.message : "rollback failed",
     );
     input.journal.pauseForRepair(intent.repositoryId, repairId, "rollback failed");
-    input.journal.enqueueReceipt(input.receiptId, intentId, "fenced");
-    if (input.callbacks.deliverReceipt()) input.journal.acknowledge(input.receiptId);
+    publishReceipt(input, intent, "fenced", manifestHash);
     return { status: "fenced" };
   }
   input.journal.pauseForRepair(
@@ -237,10 +267,35 @@ function rollback(
     repairId,
     "verified rollback requires a linked repair",
   );
-  input.journal.enqueueReceipt(input.receiptId, intentId, "rolled-back");
-  if (input.callbacks.deliverReceipt()) input.journal.acknowledge(input.receiptId);
+  publishReceipt(input, intent, "rolled-back", manifestHash);
   input.journal.markSettled(intentId, "rolled-back");
   return { status: "rolled-back" };
+}
+
+function publishReceipt(
+  input: ExecuteRequest,
+  intent: { id: string; repositoryId: string; mergeSha: string; treeHash: string },
+  kind: string,
+  manifestHash: string,
+): void {
+  input.journal.enqueueReceipt(input.receiptId, intent.id, kind, {
+    repositoryId: intent.repositoryId,
+    mergeSha: intent.mergeSha,
+    treeHash: intent.treeHash,
+    manifestHash,
+  });
+  try {
+    if (input.callbacks.deliverReceipt()) input.journal.acknowledge(input.receiptId);
+  } catch (error) {
+    throw new ReceiptDeliveryError(error instanceof Error ? error.message : "delivery failed");
+  }
+}
+
+class ReceiptDeliveryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReceiptDeliveryError";
+  }
 }
 
 function requireCallbacks(callbacks: RuntimeCallbacks, adapter: RuntimeAdapter): RuntimeCallbacks {
@@ -256,9 +311,14 @@ function requireCallbacks(callbacks: RuntimeCallbacks, adapter: RuntimeAdapter):
 }
 
 function durablePrevious(input: ExecuteRequest, intentId: string): ReadonlyMap<string, Buffer> {
-  const stored = input.journal.previousFiles(intentId);
-  if (stored.size > 0) return stored;
-  return input.callbacks.previous();
+  const stored = input.journal.readBackup(intentId);
+  if (stored.recorded) {
+    if (!stored.complete) throw new Error("incomplete backup set");
+    return stored.files;
+  }
+  const fresh = input.callbacks.previous();
+  input.journal.savePreviousFiles(intentId, fresh);
+  return fresh;
 }
 
 function clearMatchingPause(input: ExecuteRequest, repairId: string | null): void {

@@ -56,18 +56,30 @@ function assertIsolated(lanes: LaneRecord[]): void {
 }
 
 function canonicalRoot(root: string): string {
-  if (/^[A-Za-z]:[\\/]/.test(root) || root.startsWith("\\\\") || root.startsWith("//")) {
+  if (root.startsWith("\\\\") || root.startsWith("//")) {
     throw new Error(`windows absolute root ${root}`);
   }
-  let stat: fs.Stats | undefined;
-  try {
-    stat = fs.lstatSync(root);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT") throw error;
+  if (/^[A-Za-z]:[\\/]/.test(root) && process.platform !== "win32") {
+    throw new Error(`windows absolute root ${root}`);
   }
-  if (stat?.isSymbolicLink()) throw new Error(`symlink lane root ${root}`);
-  if (stat) return fs.realpathSync(root);
-  const normalized = path.posix.normalize(root.replaceAll("\\", "/"));
-  return path.resolve(normalized);
+  const resolved = path.resolve(root);
+  const missing: string[] = [];
+  let current = resolved;
+  for (;;) {
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(current);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") throw error;
+      const parent = path.dirname(current);
+      if (parent === current) return resolved;
+      missing.push(path.basename(current));
+      current = parent;
+      continue;
+    }
+    if (stat.isSymbolicLink()) throw new Error(`symlink lane root ${root}`);
+    const real = fs.realpathSync(current);
+    return missing.length === 0 ? real : path.join(real, ...missing.reverse());
+  }
 }

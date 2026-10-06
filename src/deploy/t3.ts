@@ -1,5 +1,5 @@
-import type { KeyObject } from "node:crypto";
-import DatabaseConstructor, { type Database } from "better-sqlite3";
+import { type KeyObject, randomUUID } from "node:crypto";
+import type { Database } from "better-sqlite3";
 import { migrate } from "../db/migrations.js";
 import { verifySignature } from "./crypto.js";
 import { openDeployJournal } from "./journal.js";
@@ -40,7 +40,13 @@ export interface ReviewHostOptions {
   remember?(requestId: string): void;
 }
 
-export type RoleAuthority = KeyObject | { author: KeyObject; reviewer: KeyObject };
+export type RoleAuthority = { author: KeyObject; reviewer: KeyObject };
+
+export function assertDistinctAuthorities(authority: RoleAuthority): void {
+  const author = authority.author.export({ type: "spki", format: "pem" }).toString();
+  const reviewer = authority.reviewer.export({ type: "spki", format: "pem" }).toString();
+  if (author === reviewer) throw new Error("author and reviewer keys must be distinct");
+}
 
 export interface ReviewHostRouter {
   wake(request: WakeRequest): Promise<void>;
@@ -53,12 +59,15 @@ export function createReviewHostRouter(
   authority: RoleAuthority,
   options?: ReviewHostOptions,
 ): ReviewHostRouter {
+  assertDistinctAuthorities(authority);
+  if (!options?.db) throw new Error("durable review database is required");
   const byLane = new Map(lanes.map((lane) => [lane.laneId, lane]));
-  const database = options?.db ?? new DatabaseConstructor(":memory:");
+  const database = options.db;
   migrate(database);
   const journal = openDeployJournal(database);
   return {
     async wake(request) {
+      assertDistinctAuthorities(authority);
       assertClean(request);
       const lane = byLane.get(request.laneId);
       if (!lane) throw new Error(`unknown lane ${request.laneId}`);
@@ -71,24 +80,7 @@ export function createReviewHostRouter(
       if (request.role !== "author" && request.role !== "reviewer") {
         throw new Error("wake role is not a lane role");
       }
-      if (journal.issuedWake(request.requestId)) {
-        throw new Error(`duplicate request ${request.requestId}`);
-      }
-      const thread = lane.threads[request.role];
-      await transport.deliver({
-        threadId: thread.threadId,
-        record: {
-          laneId: request.laneId,
-          role: request.role,
-          requestId: request.requestId,
-          repositoryId: request.repositoryId,
-          pr: request.pr,
-          headSha: request.headSha,
-          baseSha: request.baseSha,
-          treeHash: request.treeHash,
-        },
-      });
-      journal.issueWake({
+      const claim = journal.claimWake({
         requestId: request.requestId,
         repositoryId: request.repositoryId,
         laneId: request.laneId,
@@ -97,10 +89,33 @@ export function createReviewHostRouter(
         headSha: request.headSha,
         baseSha: request.baseSha,
         treeHash: request.treeHash,
+        holder: randomUUID(),
       });
-      options?.remember?.(request.requestId);
+      if (claim === "duplicate") throw new Error(`duplicate request ${request.requestId}`);
+      const thread = lane.threads[request.role];
+      try {
+        await transport.deliver({
+          threadId: thread.threadId,
+          record: {
+            laneId: request.laneId,
+            role: request.role,
+            requestId: request.requestId,
+            repositoryId: request.repositoryId,
+            pr: request.pr,
+            headSha: request.headSha,
+            baseSha: request.baseSha,
+            treeHash: request.treeHash,
+          },
+        });
+      } catch (error) {
+        journal.releaseWakeClaim(request.requestId);
+        throw error;
+      }
+      journal.markWakeDelivered(request.requestId);
+      options.remember?.(request.requestId);
     },
     ingestVerdict(verdict) {
+      assertDistinctAuthorities(authority);
       const lane = byLane.get(verdict.laneId);
       if (!lane || lane.repositoryId !== verdict.repositoryId) {
         throw new Error("verdict repository does not match the lane");
@@ -119,17 +134,12 @@ export function createReviewHostRouter(
         throw new Error("verdict does not match the issued request");
       }
       const { signature, ...body } = verdict;
-      if (!verifySignature(body, signature, keyFor(authority, issued.role))) {
+      if (!verifySignature(body, signature, authority[issued.role])) {
         throw new Error("verdict signature is invalid");
       }
       return verdict;
     },
   };
-}
-
-function keyFor(authority: RoleAuthority, role: Role): KeyObject {
-  if (!("author" in authority) || !("reviewer" in authority)) return authority;
-  return authority[role];
 }
 
 function assertClean(request: WakeRequest): void {

@@ -14,6 +14,7 @@ export const RuntimeAdapterSchema = z.object({
   rollback: z.enum(["files", "unsafe"]),
   architecture: z.string().min(1),
   runtimeVersions: z.record(z.string(), z.string()),
+  verificationKeyId: z.string().min(1),
 });
 
 export type RuntimeAdapter = z.infer<typeof RuntimeAdapterSchema>;

@@ -115,6 +115,7 @@ export function runDryRun(): {
     rollback: "files",
     architecture: "x64",
     runtimeVersions: { node: "20" },
+    verificationKeyId: "pinned-key",
   };
   const digest = journal.pinAdapter(adapter);
   journal.seedOwner(
@@ -260,7 +261,7 @@ function dryArtifact(
   repositoryId: string,
   adapter: RuntimeAdapter,
   write: () => void,
-): Omit<ExecuteRequest, "publicKey" | "journal" | "intentId" | "token" | "receiptId" | "replay"> {
+): Omit<ExecuteRequest, "journal" | "intentId" | "token" | "receiptId" | "replay"> {
   const bytes = Buffer.from("# example\n");
   return {
     envelope: buildArtifactEnvelope({

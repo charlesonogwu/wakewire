@@ -228,7 +228,14 @@ describe("DeploymentService", () => {
     journal.completeOwnerChange({
       repositoryId: "repo-a",
       expectedGeneration: 2,
-      next: enabledOwner(),
+      next: signed({
+        repositoryId: "repo-a",
+        owner: "omarchy" as const,
+        phase: "stable" as const,
+        generation: 3,
+        deploymentActivationEnabled: true,
+        updatedAt: "2026-10-06T00:00:00.000Z",
+      }),
       genesis: null,
       keyId: "pinned-key",
       rollback: false,

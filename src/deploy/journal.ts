@@ -56,6 +56,36 @@ export interface IssuedWake {
   treeHash: string;
 }
 
+export interface OpenIntent {
+  id: string;
+  deliveryId: string;
+  repositoryId: string;
+  mergeSha: string;
+  treeHash: string;
+  headSha: string;
+  baseSha: string;
+  pr: number;
+  repairId: string | null;
+  phase: string;
+}
+
+export interface ReceiptBinding {
+  repositoryId: string;
+  mergeSha: string;
+  treeHash: string;
+  manifestHash: string;
+}
+
+export interface StoredReceipt {
+  kind: string;
+  acknowledged: boolean;
+  intentId: string | null;
+  repositoryId: string | null;
+  mergeSha: string | null;
+  treeHash: string | null;
+  manifestHash: string | null;
+}
+
 export interface DeployJournal {
   intake(receipt: RawReceipt): void;
   applyDecision(decision: MergeDecision): void;
@@ -69,16 +99,27 @@ export interface DeployJournal {
   clearPause(repositoryId: string, repairId: string): void;
   savePreviousFiles(intentId: string, files: ReadonlyMap<string, Buffer>): void;
   previousFiles(intentId: string): Map<string, Buffer>;
+  readBackup(intentId: string): {
+    recorded: boolean;
+    complete: boolean;
+    files: Map<string, Buffer>;
+  };
   pinTrust(keyId: string, publicKey: KeyObject): void;
+  trustKey(keyId: string): KeyObject;
   pinAdapter(adapter: RuntimeAdapter): string;
   activatedAdapter(repositoryId: string): (RuntimeAdapter & { digest: string }) | null;
   issueWake(wake: IssuedWake): void;
   issuedWake(requestId: string): IssuedWake | null;
+  claimWake(wake: IssuedWake & { holder: string }): "reserved" | "duplicate";
+  markWakeDelivered(requestId: string): void;
+  releaseWakeClaim(requestId: string): void;
+  nextToken(repositoryId: string): number;
+  openIntents(repositoryId: string): OpenIntent[];
   phases(intentId: string): string[];
-  enqueueReceipt(id: string, intentId: string | null, kind: string): void;
+  enqueueReceipt(id: string, intentId: string | null, kind: string, binding?: ReceiptBinding): void;
   acknowledge(receiptId: string): void;
   pendingReceipts(): string[];
-  receipt(id: string): { kind: string; acknowledged: boolean } | null;
+  receipt(id: string): StoredReceipt | null;
   tryAcquire(token: number, scope?: FenceScope): FenceResult;
   release(token: number): void;
   retain(token: number, reason: string): void;
@@ -112,10 +153,43 @@ export interface DeployJournal {
 export function openDeployJournal(db: Database): DeployJournal {
   return {
     intake(receipt) {
-      db.prepare(
-        "INSERT OR IGNORE INTO deploy_raw_receipts (delivery_id, repository_id, kind, event_id) VALUES (?, ?, ?, ?)",
-      ).run(receipt.deliveryId, receipt.repositoryId, receipt.kind, receipt.eventId);
+      const existing = db
+        .prepare(
+          "SELECT repository_id, kind, event_id FROM deploy_raw_receipts WHERE delivery_id = ?",
+        )
+        .get(receipt.deliveryId) as
+        | { repository_id: string; kind: string; event_id: string }
+        | undefined;
+      if (existing) {
+        if (
+          existing.repository_id !== receipt.repositoryId ||
+          existing.kind !== receipt.kind ||
+          existing.event_id !== receipt.eventId
+        ) {
+          throw new Error("delivery identity is already bound to another repository");
+        }
+      } else {
+        const byEvent = db
+          .prepare("SELECT delivery_id, repository_id FROM deploy_raw_receipts WHERE event_id = ?")
+          .get(receipt.eventId) as { delivery_id: string; repository_id: string } | undefined;
+        if (
+          byEvent &&
+          (byEvent.repository_id !== receipt.repositoryId ||
+            byEvent.delivery_id !== receipt.deliveryId)
+        ) {
+          throw new Error("event identity is already bound to another repository");
+        }
+        db.prepare(
+          "INSERT INTO deploy_raw_receipts (delivery_id, repository_id, kind, event_id) VALUES (?, ?, ?, ?)",
+        ).run(receipt.deliveryId, receipt.repositoryId, receipt.kind, receipt.eventId);
+      }
       if (receipt.kind !== "merge") return;
+      const mergeOwner = db
+        .prepare("SELECT repository_id FROM deploy_merges WHERE event_id = ?")
+        .get(receipt.eventId) as { repository_id: string } | undefined;
+      if (mergeOwner && mergeOwner.repository_id !== receipt.repositoryId) {
+        throw new Error("event identity is already bound to another repository");
+      }
       const row = db
         .prepare(
           "SELECT COALESCE(MAX(sequence), 0) AS max FROM deploy_merges WHERE repository_id = ?",
@@ -147,8 +221,8 @@ export function openDeployJournal(db: Database): DeployJournal {
         }
         const id = `intent-${decision.deliveryId}`;
         db.prepare(
-          `INSERT INTO deploy_intents (id, delivery_id, repository_id, merge_sha, tree_hash, phase, manifest_hash, created_at, repair_id)
-           VALUES (?, ?, ?, ?, ?, 'recorded', NULL, ?, ?)`,
+          `INSERT INTO deploy_intents (id, delivery_id, repository_id, merge_sha, tree_hash, phase, manifest_hash, created_at, repair_id, head_sha, base_sha, pr)
+           VALUES (?, ?, ?, ?, ?, 'recorded', NULL, ?, ?, ?, ?, ?)`,
         ).run(
           id,
           decision.deliveryId,
@@ -157,6 +231,9 @@ export function openDeployJournal(db: Database): DeployJournal {
           decision.treeHash,
           new Date().toISOString(),
           decision.repairId,
+          decision.headSha,
+          decision.baseSha,
+          decision.pr,
         );
         db.prepare(
           "INSERT INTO deploy_phases (intent_id, phase, at) VALUES (?, 'recorded', ?)",
@@ -242,16 +319,36 @@ export function openDeployJournal(db: Database): DeployJournal {
       );
     },
     savePreviousFiles(intentId, files) {
-      const insert = db.prepare(
-        "INSERT OR REPLACE INTO deploy_previous_files (intent_id, path, bytes) VALUES (?, ?, ?)",
-      );
-      for (const [filePath, bytes] of files) insert.run(intentId, filePath, bytes);
+      const run = db.transaction(() => {
+        const paths = [...files.keys()].sort((left, right) => left.localeCompare(right));
+        db.prepare("DELETE FROM deploy_previous_files WHERE intent_id = ?").run(intentId);
+        const insert = db.prepare(
+          "INSERT INTO deploy_previous_files (intent_id, path, bytes) VALUES (?, ?, ?)",
+        );
+        for (const filePath of paths) {
+          const bytes = files.get(filePath);
+          if (bytes === undefined) throw new Error("incomplete backup set");
+          insert.run(intentId, filePath, bytes);
+        }
+        db.prepare(
+          "INSERT OR REPLACE INTO deploy_previous_manifests (intent_id, paths_json) VALUES (?, ?)",
+        ).run(intentId, JSON.stringify(paths));
+      });
+      run();
+    },
+    readBackup(intentId) {
+      const manifest = db
+        .prepare("SELECT paths_json FROM deploy_previous_manifests WHERE intent_id = ?")
+        .get(intentId) as { paths_json: string } | undefined;
+      const files = previousFileMap(db, intentId);
+      if (!manifest) return { recorded: false, complete: true, files };
+      const paths = JSON.parse(manifest.paths_json) as string[];
+      const complete =
+        paths.length === files.size && paths.every((filePath) => files.has(filePath));
+      return { recorded: true, complete, files };
     },
     previousFiles(intentId) {
-      const rows = db
-        .prepare("SELECT path, bytes FROM deploy_previous_files WHERE intent_id = ? ORDER BY path")
-        .all(intentId) as Array<{ path: string; bytes: Buffer }>;
-      return new Map(rows.map((row) => [row.path, Buffer.from(row.bytes)]));
+      return previousFileMap(db, intentId);
     },
     pinTrust(keyId, publicKey) {
       const pem = publicKey.export({ type: "spki", format: "pem" }).toString();
@@ -266,6 +363,9 @@ export function openDeployJournal(db: Database): DeployJournal {
         keyId,
         pem,
       );
+    },
+    trustKey(keyId) {
+      return resolveTrustKey(db, keyId);
     },
     pinAdapter(adapter) {
       const parsed = parseRuntimeAdapter(adapter);
@@ -309,8 +409,8 @@ export function openDeployJournal(db: Database): DeployJournal {
     issueWake(wake) {
       db.prepare(
         `INSERT INTO deploy_wakes
-         (request_id, repository_id, lane_id, role, pr, head_sha, base_sha, tree_hash)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         (request_id, repository_id, lane_id, role, pr, head_sha, base_sha, tree_hash, delivered, holder)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, NULL)`,
       ).run(
         wake.requestId,
         wake.repositoryId,
@@ -322,11 +422,131 @@ export function openDeployJournal(db: Database): DeployJournal {
         wake.treeHash,
       );
     },
+    claimWake(wake) {
+      const run = db.transaction(() => {
+        const row = db
+          .prepare(
+            `SELECT repository_id, lane_id, role, pr, head_sha, base_sha, tree_hash, delivered, holder
+             FROM deploy_wakes WHERE request_id = ?`,
+          )
+          .get(wake.requestId) as
+          | {
+              repository_id: string;
+              lane_id: string;
+              role: string;
+              pr: number;
+              head_sha: string;
+              base_sha: string;
+              tree_hash: string;
+              delivered: number;
+              holder: string | null;
+            }
+          | undefined;
+        if (!row) {
+          db.prepare(
+            `INSERT INTO deploy_wakes
+             (request_id, repository_id, lane_id, role, pr, head_sha, base_sha, tree_hash, delivered, holder)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+          ).run(
+            wake.requestId,
+            wake.repositoryId,
+            wake.laneId,
+            wake.role,
+            wake.pr,
+            wake.headSha,
+            wake.baseSha,
+            wake.treeHash,
+            wake.holder,
+          );
+          return "reserved" as const;
+        }
+        if (
+          row.repository_id !== wake.repositoryId ||
+          row.lane_id !== wake.laneId ||
+          row.role !== wake.role ||
+          row.pr !== wake.pr ||
+          row.head_sha !== wake.headSha ||
+          row.base_sha !== wake.baseSha ||
+          row.tree_hash !== wake.treeHash
+        ) {
+          throw new Error("wake identity is already bound to another repository");
+        }
+        if (row.delivered === 1 || row.holder) return "duplicate" as const;
+        const claimed = db
+          .prepare(
+            "UPDATE deploy_wakes SET holder = ? WHERE request_id = ? AND holder IS NULL AND delivered = 0",
+          )
+          .run(wake.holder, wake.requestId);
+        return claimed.changes === 1 ? ("reserved" as const) : ("duplicate" as const);
+      });
+      return run();
+    },
+    markWakeDelivered(requestId) {
+      db.prepare("UPDATE deploy_wakes SET delivered = 1, holder = NULL WHERE request_id = ?").run(
+        requestId,
+      );
+    },
+    releaseWakeClaim(requestId) {
+      db.prepare(
+        "UPDATE deploy_wakes SET holder = NULL WHERE request_id = ? AND delivered = 0",
+      ).run(requestId);
+    },
+    nextToken(repositoryId) {
+      const run = db.transaction(() => {
+        const fence = readFence(db);
+        const maxRow = db
+          .prepare("SELECT COALESCE(MAX(token), 0) AS max FROM deploy_tokens")
+          .get() as {
+          max: number;
+        };
+        const next = Math.max(fence.token, maxRow.max) + 1;
+        db.prepare(
+          `INSERT INTO deploy_tokens (repository_id, token) VALUES (?, ?)
+           ON CONFLICT(repository_id) DO UPDATE SET token = excluded.token`,
+        ).run(repositoryId, next);
+        return next;
+      });
+      return run();
+    },
+    openIntents(repositoryId) {
+      const rows = db
+        .prepare(
+          `SELECT id, delivery_id, repository_id, merge_sha, tree_hash, phase, repair_id,
+                  head_sha, base_sha, pr
+           FROM deploy_intents
+           WHERE repository_id = ? AND phase IN ('recorded', 'prepared', 'activating', 'pending')
+           ORDER BY created_at`,
+        )
+        .all(repositoryId) as Array<{
+        id: string;
+        delivery_id: string;
+        repository_id: string;
+        merge_sha: string;
+        tree_hash: string;
+        phase: string;
+        repair_id: string | null;
+        head_sha: string | null;
+        base_sha: string | null;
+        pr: number | null;
+      }>;
+      return rows.map((row) => ({
+        id: row.id,
+        deliveryId: row.delivery_id,
+        repositoryId: row.repository_id,
+        mergeSha: row.merge_sha,
+        treeHash: row.tree_hash,
+        headSha: row.head_sha ?? "",
+        baseSha: row.base_sha ?? "",
+        pr: row.pr ?? 0,
+        repairId: row.repair_id,
+        phase: row.phase,
+      }));
+    },
     issuedWake(requestId) {
       const row = db
         .prepare(
           `SELECT request_id, repository_id, lane_id, role, pr, head_sha, base_sha, tree_hash
-           FROM deploy_wakes WHERE request_id = ?`,
+           FROM deploy_wakes WHERE request_id = ? AND delivered = 1`,
         )
         .get(requestId) as
         | {
@@ -369,10 +589,49 @@ export function openDeployJournal(db: Database): DeployJournal {
         }>
       ).map((row) => row.phase);
     },
-    enqueueReceipt(id, intentId, kind) {
-      db.prepare(
-        "INSERT INTO deploy_outbox (id, intent_id, kind, acknowledged) VALUES (?, ?, ?, 0)",
-      ).run(id, intentId, kind);
+    enqueueReceipt(id, intentId, kind, binding) {
+      const run = db.transaction(() => {
+        const row = db
+          .prepare(
+            `SELECT intent_id, kind, repository_id, merge_sha, tree_hash, manifest_hash
+             FROM deploy_outbox WHERE id = ?`,
+          )
+          .get(id) as
+          | {
+              intent_id: string | null;
+              kind: string;
+              repository_id: string | null;
+              merge_sha: string | null;
+              tree_hash: string | null;
+              manifest_hash: string | null;
+            }
+          | undefined;
+        if (row) {
+          const mismatch =
+            row.intent_id !== intentId ||
+            row.kind !== kind ||
+            (binding && row.repository_id !== binding.repositoryId) ||
+            (binding && row.merge_sha !== binding.mergeSha) ||
+            (binding && row.tree_hash !== binding.treeHash) ||
+            (binding && row.manifest_hash !== binding.manifestHash);
+          if (mismatch) throw new Error("unrelated receipt");
+          return;
+        }
+        db.prepare(
+          `INSERT INTO deploy_outbox
+           (id, intent_id, kind, acknowledged, repository_id, merge_sha, tree_hash, manifest_hash)
+           VALUES (?, ?, ?, 0, ?, ?, ?, ?)`,
+        ).run(
+          id,
+          intentId,
+          kind,
+          binding?.repositoryId ?? null,
+          binding?.mergeSha ?? null,
+          binding?.treeHash ?? null,
+          binding?.manifestHash ?? null,
+        );
+      });
+      run();
     },
     acknowledge(receiptId) {
       db.prepare("UPDATE deploy_outbox SET acknowledged = 1 WHERE id = ?").run(receiptId);
@@ -385,10 +644,33 @@ export function openDeployJournal(db: Database): DeployJournal {
       ).map((row) => row.id);
     },
     receipt(id) {
-      const row = db.prepare("SELECT kind, acknowledged FROM deploy_outbox WHERE id = ?").get(id) as
-        | { kind: string; acknowledged: number }
+      const row = db
+        .prepare(
+          `SELECT kind, acknowledged, intent_id, repository_id, merge_sha, tree_hash, manifest_hash
+           FROM deploy_outbox WHERE id = ?`,
+        )
+        .get(id) as
+        | {
+            kind: string;
+            acknowledged: number;
+            intent_id: string | null;
+            repository_id: string | null;
+            merge_sha: string | null;
+            tree_hash: string | null;
+            manifest_hash: string | null;
+          }
         | undefined;
-      return row ? { kind: row.kind, acknowledged: row.acknowledged === 1 } : null;
+      return row
+        ? {
+            kind: row.kind,
+            acknowledged: row.acknowledged === 1,
+            intentId: row.intent_id,
+            repositoryId: row.repository_id,
+            mergeSha: row.merge_sha,
+            treeHash: row.tree_hash,
+            manifestHash: row.manifest_hash,
+          }
+        : null;
     },
     tryAcquire(token, scope) {
       const run = db.transaction(() => {
@@ -493,6 +775,12 @@ export function openDeployJournal(db: Database): DeployJournal {
         }
         if (change.rollback && readFence(db).fenced)
           throw new Error("uncertainty fence blocking rollback");
+        if (change.next.repositoryId !== change.repositoryId) {
+          throw new Error("owner repository mismatch");
+        }
+        if (change.next.generation !== change.expectedGeneration + 1) {
+          throw new Error("owner generation is not strictly newer");
+        }
         if (owner.pinned_key_id && change.keyId !== owner.pinned_key_id) {
           throw new Error("pinned key mismatch");
         }
@@ -653,6 +941,13 @@ function resolveTrustKey(db: Database, keyId: string): KeyObject {
     | undefined;
   if (!row) throw new Error("trust key is not pinned");
   return createPublicKey(row.public_pem);
+}
+
+function previousFileMap(db: Database, intentId: string): Map<string, Buffer> {
+  const rows = db
+    .prepare("SELECT path, bytes FROM deploy_previous_files WHERE intent_id = ? ORDER BY path")
+    .all(intentId) as Array<{ path: string; bytes: Buffer }>;
+  return new Map(rows.map((row) => [row.path, Buffer.from(row.bytes)]));
 }
 
 function readOwner(db: Database, repositoryId: string): OwnerRow | undefined {

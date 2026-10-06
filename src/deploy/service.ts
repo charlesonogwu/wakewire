@@ -1,7 +1,7 @@
 import type { KeyObject } from "node:crypto";
 import { verifySignature } from "./crypto.js";
 import type { ExecuteRequest, ExecuteResult } from "./executor.js";
-import type { DeployJournal, OwnerChange, RawReceipt } from "./journal.js";
+import type { DeployJournal, OpenIntent, OwnerChange, RawReceipt } from "./journal.js";
 import { type FreshMerge, scan } from "./reconcile.js";
 import type { MergeDecision, OwnerHost } from "./types.js";
 
@@ -22,10 +22,7 @@ export interface DeploymentServiceDeps {
   execute: (input?: ExecuteRequest) => ExecuteResult;
   artifactFor?: (
     decision: Extract<MergeDecision, { kind: "intent" }>,
-  ) => Omit<
-    ExecuteRequest,
-    "publicKey" | "journal" | "intentId" | "token" | "receiptId" | "replay"
-  >;
+  ) => Omit<ExecuteRequest, "journal" | "intentId" | "token" | "receiptId" | "replay">;
   nextToken?: () => number;
   deliverReceipt?: (receiptId: string) => boolean;
 }
@@ -61,16 +58,20 @@ export function createDeploymentService(deps: DeploymentServiceDeps): Deployment
           if (deps.deliverReceipt(receiptId)) deps.journal.acknowledge(receiptId);
         }
       }
+      const executed = new Set<string>();
       const run = (decision: Extract<MergeDecision, { kind: "intent" }>, intentId: string) => {
+        if (executed.has(intentId)) return;
+        executed.add(intentId);
         const built = deps.artifactFor?.(decision);
         const result = deps.execute(
           built
             ? {
                 ...built,
-                publicKey: deps.publicKey,
                 journal: deps.journal,
                 intentId,
-                token: (deps.nextToken ?? (() => 1))(),
+                token: deps.nextToken
+                  ? deps.nextToken()
+                  : deps.journal.nextToken(decision.repositoryId),
                 receiptId: `receipt-${decision.deliveryId}`,
                 replay: false,
               }
@@ -95,7 +96,16 @@ export function createDeploymentService(deps: DeploymentServiceDeps): Deployment
         }
         executions += 1;
       };
-      for (const decision of scan(deps.freshMerges(repositoryId))) {
+      const merges = deps.freshMerges(repositoryId);
+      for (const merge of merges) {
+        if (merge.repositoryId !== repositoryId) {
+          throw new Error("scan repository does not match the tick repository");
+        }
+      }
+      for (const decision of scan(merges)) {
+        if (decision.repositoryId !== repositoryId) {
+          throw new Error("scan repository does not match the tick repository");
+        }
         if (
           decision.eventId &&
           deps.journal.disposition(repositoryId, decision.eventId) === "bootstrap-consumed"
@@ -126,6 +136,10 @@ export function createDeploymentService(deps: DeploymentServiceDeps): Deployment
         if (!intentId) throw new Error("intent is required");
         run(decision, intentId);
       }
+      for (const open of deps.journal.openIntents(repositoryId)) {
+        if (executed.has(open.id) || !openPhase(open.phase)) continue;
+        run(intentFromOpen(open), open.id);
+      }
       return { decisions, executions };
     },
     bootstrap(change) {
@@ -143,6 +157,21 @@ export function createDeploymentService(deps: DeploymentServiceDeps): Deployment
       deps.journal.beginDrain(change.repositoryId, change.expectedGeneration);
       deps.journal.completeOwnerChange(change);
     },
+  };
+}
+
+function intentFromOpen(open: OpenIntent): Extract<MergeDecision, { kind: "intent" }> {
+  return {
+    kind: "intent",
+    repositoryId: open.repositoryId,
+    repairId: open.repairId,
+    notice: null,
+    deliveryId: open.deliveryId,
+    mergeSha: open.mergeSha,
+    treeHash: open.treeHash,
+    headSha: open.headSha,
+    baseSha: open.baseSha,
+    pr: open.pr,
   };
 }
 

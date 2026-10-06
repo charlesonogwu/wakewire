@@ -15,6 +15,7 @@ describe("RuntimeAdapterSchema", () => {
       rollback: "files",
       architecture: "x64",
       runtimeVersions: { python: "3.11" },
+      verificationKeyId: "pinned-key",
     });
     expect(adapter.rollback).toBe("files");
     expect(() => parseRuntimeAdapter({ ...adapter, rollback: "shell" })).toThrow();

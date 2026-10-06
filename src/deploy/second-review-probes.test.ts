@@ -51,6 +51,7 @@ function trustedAdapter(
     rollback,
     architecture: "x64",
     runtimeVersions: { node: "20" },
+    verificationKeyId: "pinned-key",
   };
 }
 
@@ -217,7 +218,6 @@ describe("second review probes", () => {
       executeRelease({
         envelope,
         bytes: new Map([[".env", bytes]]),
-        publicKey,
         expected: { architecture: "x64", runtimeVersions: { node: "20" }, repositoryId: "repo-a" },
         journal: store,
         intentId: "intent-d1",
@@ -336,7 +336,6 @@ describe("second review probes", () => {
     executeRelease({
       envelope,
       bytes: new Map([["src/app.py", bytes]]),
-      publicKey,
       expected: { architecture: "x64", runtimeVersions: { node: "20" }, repositoryId: "repo-a" },
       journal: store,
       intentId: "intent-d1",
@@ -630,7 +629,6 @@ describe("second review probes", () => {
       executeRelease({
         envelope,
         bytes: new Map([["src/app.py", bytes]]),
-        publicKey,
         expected: { architecture: "x64", runtimeVersions: { node: "20" }, repositoryId: "repo-a" },
         journal: store,
         intentId: "intent-d1",
@@ -731,7 +729,6 @@ describe("second review probes", () => {
       executeRelease({
         envelope: docs,
         bytes: new Map(),
-        publicKey,
         expected: { architecture: "x64", runtimeVersions: { node: "20" }, repositoryId: "repo-a" },
         journal: store,
         intentId: "intent-other-repair",
@@ -762,7 +759,6 @@ describe("second review probes", () => {
       executeRelease({
         envelope: docs,
         bytes: new Map(),
-        publicKey,
         expected: { architecture: "x64", runtimeVersions: { node: "20" }, repositoryId: "repo-a" },
         journal: store,
         intentId: "intent-linked-repair",
@@ -803,7 +799,6 @@ describe("second review probes", () => {
     const fenced = executeRelease({
       envelope,
       bytes: new Map([["src/app.py", bytes]]),
-      publicKey,
       expected: { architecture: "x64", runtimeVersions: { node: "20" }, repositoryId: "repo-a" },
       journal: store,
       intentId: "intent-d1",

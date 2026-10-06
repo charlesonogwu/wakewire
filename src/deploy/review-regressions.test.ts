@@ -23,6 +23,7 @@ import { createReviewHostRouter } from "./t3.js";
 import type { LaneRecord } from "./types.js";
 
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+const authorKeys = generateKeyPairSync("ed25519");
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
 const TREE = "c".repeat(40);
@@ -64,6 +65,7 @@ function activatedAdapter(repositoryId: string): RuntimeAdapter {
     rollback: "files",
     architecture: "x64",
     runtimeVersions: { node: "20" },
+    verificationKeyId: "pinned-key",
   };
 }
 
@@ -154,7 +156,6 @@ describe("review regressions", () => {
       executeRelease({
         envelope,
         bytes: new Map([["src/app.py", Buffer.from("print(1)\n")]]),
-        publicKey,
         expected: { architecture: "x64", runtimeVersions: { node: "20" }, repositoryId: "repo-b" },
         journal: store,
         intentId: "intent-d1",
@@ -182,7 +183,6 @@ describe("review regressions", () => {
       executeRelease({
         envelope,
         bytes: new Map(),
-        publicKey,
         expected: { architecture: "x64", runtimeVersions: { node: "20" }, repositoryId: "repo-b" },
         journal: store,
         intentId: null,
@@ -555,7 +555,6 @@ describe("review regressions", () => {
     const first = executeRelease({
       envelope,
       bytes: new Map([["src/app.py", bytes]]),
-      publicKey,
       expected: { architecture: "x64", runtimeVersions: { node: "20" }, repositoryId: "repo-a" },
       journal: store,
       intentId: "intent-d1",
@@ -620,7 +619,6 @@ describe("review regressions", () => {
     const rolled = executeRelease({
       envelope,
       bytes: new Map([["src/app.py", bytes]]),
-      publicKey,
       expected: { architecture: "x64", runtimeVersions: { node: "20" }, repositoryId: "repo-a" },
       journal: store,
       intentId: "intent-d1",
@@ -663,7 +661,6 @@ describe("review regressions", () => {
     const blocked = executeRelease({
       envelope,
       bytes: new Map([["src/app.py", bytes]]),
-      publicKey,
       expected: { architecture: "x64", runtimeVersions: { node: "20" }, repositoryId: "repo-a" },
       journal: store,
       intentId: "intent-d2",
@@ -721,7 +718,6 @@ describe("review regressions", () => {
     const result = executeRelease({
       envelope,
       bytes: new Map([["src/app.py", bytes]]),
-      publicKey,
       expected: { architecture: "x64", runtimeVersions: { node: "20" }, repositoryId: "repo-a" },
       journal: store,
       intentId: "intent-d1",
@@ -813,6 +809,8 @@ describe("review regressions", () => {
     };
     let failOnce = true;
     const seen: string[] = [];
+    const reviewDb = new DatabaseConstructor(":memory:");
+    migrate(reviewDb);
     const router = createReviewHostRouter(
       [lane],
       {
@@ -823,8 +821,9 @@ describe("review regressions", () => {
           }
         },
       },
-      publicKey,
+      { author: authorKeys.publicKey, reviewer: publicKey },
       {
+        db: reviewDb,
         remember(requestId) {
           seen.push(requestId);
         },
@@ -1017,7 +1016,9 @@ describe("review regressions", () => {
         ],
       }),
     );
-    expect(() => loadRegistry(file)).toThrow(/windows/);
+    expect(() => loadRegistry(file)).toThrow(
+      process.platform === "win32" ? /linux-only/ : /windows/,
+    );
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });

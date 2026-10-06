@@ -35,6 +35,7 @@ function runtimeAdapter(
     rollback,
     architecture: "x64",
     runtimeVersions: { python: "3.11" },
+    verificationKeyId: "pinned-key",
   };
 }
 
@@ -152,7 +153,6 @@ describe("executeRelease", () => {
     const busy = executeRelease({
       envelope: envelope(),
       bytes: new Map([["src/app.py", Buffer.from("print(1)\n")]]),
-      publicKey,
       expected: {
         architecture: "x64",
         runtimeVersions: { python: "3.11" },
@@ -184,7 +184,6 @@ describe("executeRelease", () => {
     executeRelease({
       envelope: envelope(),
       bytes: new Map([["src/app.py", Buffer.from("print(1)\n")]]),
-      publicKey,
       expected: {
         architecture: "x64",
         runtimeVersions: { python: "3.11" },
@@ -214,7 +213,7 @@ describe("executeRelease", () => {
     expect(order.indexOf("lease")).toBeLessThan(order.indexOf("idle"));
     expect(order.indexOf("idle")).toBeLessThan(order.indexOf("lock"));
     expect(order.indexOf("lock")).toBeLessThan(order.indexOf("order"));
-    expect(restored).toBe(previous);
+    expect(restored).toStrictEqual(previous);
   });
 
   it("emits nothing-to-deploy without writing and fences an unsafe rollback", () => {
@@ -237,7 +236,6 @@ describe("executeRelease", () => {
     const result = executeRelease({
       envelope: empty,
       bytes: new Map(),
-      publicKey,
       expected: {
         architecture: "x64",
         runtimeVersions: { python: "3.11" },
@@ -260,7 +258,6 @@ describe("executeRelease", () => {
     const fenced = executeRelease({
       envelope: envelope(),
       bytes: new Map([["src/app.py", Buffer.from("print(1)\n")]]),
-      publicKey,
       expected: {
         architecture: "x64",
         runtimeVersions: { python: "3.11" },
@@ -290,7 +287,6 @@ describe("executeRelease", () => {
     const request = {
       envelope: envelope(),
       bytes,
-      publicKey,
       expected: {
         architecture: "x64",
         runtimeVersions: { python: "3.11" },
@@ -352,7 +348,6 @@ describe("executeRelease", () => {
       executeRelease({
         envelope: forged,
         bytes: new Map([["src/app.py", Buffer.from("print(1)\n")]]),
-        publicKey,
         expected: {
           architecture: "x64",
           runtimeVersions: { python: "3.11" },
@@ -380,7 +375,6 @@ describe("executeRelease", () => {
     executeRelease({
       envelope: envelope(),
       bytes: new Map([["src/app.py", Buffer.from("print(1)\n")]]),
-      publicKey,
       expected: {
         architecture: "x64",
         runtimeVersions: { python: "3.11" },
@@ -396,7 +390,6 @@ describe("executeRelease", () => {
           other = executeRelease({
             envelope: envelope(Buffer.from("print(2)\n"), "repo-b"),
             bytes: new Map([["src/app.py", Buffer.from("print(2)\n")]]),
-            publicKey,
             expected: {
               architecture: "x64",
               runtimeVersions: { python: "3.11" },
@@ -430,7 +423,6 @@ describe("executeRelease", () => {
     executeRelease({
       envelope: envelope(),
       bytes: new Map([["src/app.py", Buffer.from("print(1)\n")]]),
-      publicKey,
       expected: {
         architecture: "x64",
         runtimeVersions: { python: "3.11" },
@@ -454,7 +446,6 @@ describe("executeRelease", () => {
     const later = executeRelease({
       envelope: envelope(),
       bytes: new Map([["src/app.py", Buffer.from("print(1)\n")]]),
-      publicKey,
       expected: {
         architecture: "x64",
         runtimeVersions: { python: "3.11" },
@@ -484,7 +475,6 @@ describe("executeRelease", () => {
     const result = executeRelease({
       envelope: envelope(),
       bytes: new Map([["src/app.py", Buffer.from("print(1)\n")]]),
-      publicKey,
       expected: {
         architecture: "x64",
         runtimeVersions: { python: "3.11" },

@@ -83,6 +83,13 @@ function promote(candidate: Candidate): Candidate {
 }
 
 function canReady(candidate: Candidate): boolean {
+  if (
+    candidate.id.headSha.length === 0 ||
+    candidate.id.baseSha.length === 0 ||
+    candidate.id.treeHash.length === 0
+  ) {
+    return false;
+  }
   if (candidate.draft || candidate.unresolvedFindings > 0 || candidate.checks !== "success")
     return false;
   const approved = (role: Verdict["role"]) =>
