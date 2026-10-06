@@ -273,7 +273,7 @@ export interface ArtifactEnvelope {
 }
 ```
 
-The initial adapter trust root is a one-time operator-signed record stored outside the executor and bound to repository ID, adapter digest/version, and the *target* owner generation of the planned cutover. The owner compare-and-swap verifies and consumes that record in the same transaction that creates that generation; it is never accepted against the prior `legacy` generation. The executor may verify and consume the record exactly once; it cannot create, edit, or replace it. Every later adapter must be activated by a separate, already-trusted release.
+The initial adapter trust root is a one-time operator-signed record stored outside the executor and bound to repository ID, adapter digest/version, and the *target* owner generation of the planned cutover. The owner compare-and-swap is the sole consumer: it verifies and consumes that record in the same transaction that creates that generation, and the record is never accepted against the prior `legacy` generation. The executor only verifies that the consumed genesis record matches the active owner generation; it cannot consume, create, edit, or replace it. Every later adapter must be activated by a separate, already-trusted release.
 
 - [ ] **Step 4: Verify**
 
@@ -381,7 +381,7 @@ git commit -m "feat: execute fenced automatic deployments"
 
 - [ ] **Step 1: Write failing CLI safety tests**
 
-Test default dry-run, no merge command, no arbitrary repo/path/command parameters, redacted status, explicit recovery token, refusal to clear an unverified fence, one-time genesis consumption, stale owner generation, drain-state refusal, proof that no activation occurs while `deploymentActivationEnabled` is false, and an exact merge intent journaled while disabled executing exactly once after the gate is enabled.
+Test default dry-run, no merge command, no arbitrary repo/path/command parameters, redacted status, explicit recovery token, refusal to clear an unverified fence, one-time genesis consumption, stale owner generation, drain-state refusal, proof that no activation occurs while `deploymentActivationEnabled` is false, and a signed merge-event receipt journaled while disabled producing one fresh intent and one deployment after the gate is enabled.
 
 - [ ] **Step 2: Prove red**
 
@@ -390,7 +390,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement dry-run and documented cutover surfaces**
 
-Dry-run consumes synthetic repository IDs and artifacts only and may invoke the Task 7 executor solely through its dry-run adapter. `DeploymentService.tick()` may call Task 4 `scan()` and store its `intent` or `refuse` result only when the shared owner record names this host and `deploymentActivationEnabled` is true; otherwise it is read-only. Private cutover code may change that single gate only through an owner-record compare-and-swap after the genesis adapter and synthetic dry run pass. The separate recovery command calls only `recover(observedManifest)` and has no scan, deploy, pause-clear, or activation-enable path. Documentation uses placeholders and does not name private repositories or runtime paths.
+Dry-run consumes synthetic repository IDs and artifacts only and may invoke the Task 7 executor solely through its dry-run adapter. `DeploymentService.intake()` may durably store a signed, deduplicated GitHub event receipt while activation is off, but it cannot create a merge decision, intent, pause, or activation. `DeploymentService.tick()` may call Task 4 `scan()`, create/store its `intent` or `refuse`, and invoke the executor only when the shared owner record stably names this host and `deploymentActivationEnabled` is true. It revalidates fresh GitHub state rather than trusting the queued event body. Private cutover code may change that single gate only through an owner-record compare-and-swap after the genesis adapter and synthetic dry run pass. The separate recovery command calls only `recover(observedManifest)` and has no scan, deploy, pause-clear, or activation-enable path. Documentation uses placeholders and does not name private repositories or runtime paths.
 
 - [ ] **Step 4: Run release-quality verification**
 
