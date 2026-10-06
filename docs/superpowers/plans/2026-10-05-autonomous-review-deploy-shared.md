@@ -250,7 +250,7 @@ git commit -m "feat: validate operator merges"
 
 - [ ] **Step 1: Write failing provenance tests**
 
-Test changed bytes after signing, wrong repository, wrong architecture/runtime, path traversal, duplicate files, symlinks, same-merge adapter update, unknown compatibility, documentation-only artifacts, missing genesis signature, reused genesis record, repository mismatch, and an executor attempting to create its own genesis trust.
+Test changed bytes after signing, wrong repository, wrong architecture/runtime, path traversal, duplicate files, symlinks, same-merge adapter update, unknown compatibility, documentation/repository-only artifacts, missing genesis signature, reused genesis record, repository mismatch, and an executor attempting to create its own genesis trust. A merge containing only reviewed repository metadata, tests, docs, or a WakeWire pin must build an empty deployable manifest rather than fail validation.
 
 - [ ] **Step 2: Prove red**
 
@@ -341,7 +341,7 @@ git commit -m "feat: persist deployment transactions"
 
 - [ ] **Step 1: Write executor ordering and rollback tests**
 
-Assert: advisory busy checks hold no global lock; admission lease precedes idle recheck; lock is bounded; ordering rechecks under lock; partial activation restores exact previous manifest; unsafe rollback fences; another repository remains pending rather than blocked; outbox replay does not reactivate; `recover(observedManifest)` keeps the fence when the manifest differs and clears it without creating a deployment intent only when the manifest exactly matches the journal.
+Assert: advisory busy checks hold no global lock; admission lease precedes idle recheck; lock is bounded; ordering rechecks under lock; partial activation restores exact previous manifest; unsafe rollback fences; another repository remains pending rather than blocked; outbox replay does not reactivate; an empty deployable manifest emits and acknowledges `nothing-to-deploy` without pause or runtime mutation; and `recover(observedManifest)` keeps the fence when the manifest differs and clears it without creating a deployment intent only when the manifest exactly matches the journal.
 
 - [ ] **Step 2: Prove red**
 
