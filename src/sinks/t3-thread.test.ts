@@ -96,6 +96,118 @@ function fixture() {
   };
 }
 describe("ported T3 owner delivery", () => {
+  it("keeps a crash between receipt claim and send uncertain when no marker exists", async () => {
+    const f = fixture();
+    await f.adapter.close();
+    const db = new Database(f.config.stateFile);
+    db.prepare(
+      "INSERT INTO t3_receipts(id,hash,state,target_thread_id) VALUES (?,?,'sending',?)",
+    ).run(
+      opts.deliveryId,
+      createHash("sha256")
+        .update(JSON.stringify(["primary", "hello"]))
+        .digest("hex"),
+      "primary",
+    );
+    db.close();
+    const restarted = new T3ThreadAdapter(f.config, f.client, f.logger);
+    adapters.push(restarted);
+    await expect(restarted.deliverToThread("primary", "hello", opts)).rejects.toThrow(
+      /Uncertain T3 delivery/,
+    );
+    expect(f.calls.some((call) => call.name === "get_thread")).toBe(true);
+    expect(f.calls.some((call) => call.name === "send_message")).toBe(false);
+  });
+  it("reconciles a projected send after a lost response, without another send", async () => {
+    const f = fixture();
+    const read = f.client.call.bind(f.client);
+    let projected = "";
+    f.client.call = async (name, args) => {
+      const response = await read(name, args);
+      if (name === "send_message") {
+        projected = String(args.message);
+        throw new Error("timeout");
+      }
+      if (name === "get_thread" && projected)
+        return packed({
+          ...f.primaryState,
+          messages: [{ role: "user", text: projected }],
+          page: { hasMore: false },
+        });
+      return response;
+    };
+    await expect(f.adapter.deliverToThread("primary", "hello", opts)).resolves.toEqual({
+      threadId: "primary",
+    });
+    await f.adapter.deliverToThread("primary", "hello", opts);
+    expect(f.calls.filter((call) => call.name === "send_message")).toHaveLength(1);
+  });
+  it("reconciles an existing pending fallback receipt after restart on an older page", async () => {
+    const f = fixture();
+    f.primaryState.attention = "error";
+    const read = f.client.call.bind(f.client);
+    f.client.call = async (name, args) => {
+      const response = await read(name, args);
+      if (name === "send_message") throw new Error("timeout");
+      return response;
+    };
+    await expect(f.adapter.deliverToThread("primary", "hello", opts)).rejects.toBeInstanceOf(
+      PermanentError,
+    );
+    await f.adapter.close();
+    f.primaryState.attention = "idle";
+    f.client.call = async (name, args) => {
+      if (name === "get_thread" && args.threadId === "fallback")
+        return packed({
+          ...f.fallbackState,
+          messages: args.beforeCursor
+            ? [{ role: "user", text: '[wakewire-delivery:"delivery-one"]\n\nhello' }]
+            : [],
+          page: args.beforeCursor ? { hasMore: false } : { hasMore: true, beforeCursor: "older" },
+        });
+      return read(name, args);
+    };
+    const restarted = new T3ThreadAdapter(f.config, f.client, f.logger);
+    adapters.push(restarted);
+    await expect(restarted.deliverToThread("primary", "hello", opts)).resolves.toEqual({
+      threadId: "fallback",
+    });
+    expect(f.calls.filter((call) => call.name === "send_message")).toHaveLength(1);
+  });
+  it.each(["assistant", "wrong-marker", "wrong-environment"])(
+    "does not reconcile %s evidence",
+    async (kind) => {
+      const f = fixture();
+      const read = f.client.call.bind(f.client);
+      f.client.call = async (name, args) => {
+        const response = await read(name, args);
+        if (name === "send_message") throw new Error("timeout");
+        if (name === "get_thread" && args.turnLimit === 50)
+          return packed({
+            ...f.primaryState,
+            environmentId: kind === "wrong-environment" ? "other" : f.primary.environmentId,
+            messages: [
+              {
+                role: kind === "assistant" ? "assistant" : "user",
+                text:
+                  kind === "wrong-marker"
+                    ? '[wakewire-delivery:"delivery-one-extra"]'
+                    : '[wakewire-delivery:"delivery-one"]',
+              },
+            ],
+            page: { hasMore: false },
+          });
+        return response;
+      };
+      await expect(f.adapter.deliverToThread("primary", "hello", opts)).rejects.toBeInstanceOf(
+        PermanentError,
+      );
+      await expect(f.adapter.deliverToThread("primary", "hello", opts)).rejects.toBeInstanceOf(
+        PermanentError,
+      );
+      expect(f.calls.filter((call) => call.name === "send_message")).toHaveLength(1);
+    },
+  );
   it.each(["sent", "sending"])("preserves deployed three-column %s receipts", async (state) => {
     const f = fixture();
     const stateFile = path.join(f.primary.cwd, "legacy.db");
@@ -114,7 +226,8 @@ describe("ported T3 owner delivery", () => {
     const delivery = migrated.deliverToThread("primary", "hello", opts);
     if (state === "sent") await expect(delivery).resolves.toEqual({ threadId: "primary" });
     else await expect(delivery).rejects.toBeInstanceOf(PermanentError);
-    expect(f.calls).toHaveLength(0);
+    if (state === "sent") expect(f.calls).toHaveLength(0);
+    expect(f.calls.some((call) => call.name === "send_message")).toBe(false);
   });
   it("verifies identities and sends a marked after-current message", async () => {
     const f = fixture();

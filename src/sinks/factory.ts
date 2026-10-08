@@ -32,7 +32,7 @@ export function createAdapter(config: DaemonConfig, logger: Logger): AgentAdapte
         coordination: _coordination,
         ...targetConfig
       } = registration;
-      const t3 = new T3ThreadAdapter(targetConfig, new T3McpClient(registration), logger);
+      const t3 = new T3ThreadAdapter(targetConfig, new T3McpClient(registration, logger), logger);
       if (!registration.coordination) return t3;
       const snapshots = new GithubSnapshotClient(registration.coordination.expectedRepository);
       const completion = new CoordinationCompletionMonitor({

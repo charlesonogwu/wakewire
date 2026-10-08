@@ -3,24 +3,41 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import type { Logger } from "../logging.js";
 import type { T3Config, T3ToolClient } from "./t3-thread.js";
-import { PermanentError } from "./types.js";
+import { PermanentError, UnreachableError } from "./types.js";
+
+/** Raised only before an MCP transport is opened: no request was submitted. */
+export class T3BridgeUnavailableError extends UnreachableError {}
 
 /** Port of the deployed MR T client: pinned bridge, inherited private user auth. */
 export class T3McpClient implements T3ToolClient {
   private closed = false;
   private readonly clients = new Set<Client>();
-  constructor(private readonly config: T3Config & { serverPath: string; serverSha256: string }) {
+  constructor(
+    private readonly config: T3Config & { serverPath: string; serverSha256: string },
+    private readonly logger: Logger,
+  ) {
     if (!path.isAbsolute(config.serverPath) || !/^[a-f0-9]{64}$/.test(config.serverSha256))
       throw new PermanentError("Invalid T3 bridge registration");
-    this.verify();
   }
   private verify() {
-    if (
-      createHash("sha256").update(readFileSync(this.config.serverPath)).digest("hex") !==
-      this.config.serverSha256
-    )
-      throw new PermanentError("T3 bridge changed; reverify registration");
+    try {
+      if (
+        createHash("sha256").update(readFileSync(this.config.serverPath)).digest("hex") ===
+        this.config.serverSha256
+      )
+        return;
+    } catch {
+      /* Missing/unreadable bridge is recoverable after re-registration. */
+    }
+    this.logger.error(
+      { adapter: "t3-thread" },
+      "re-register T3 bridge: pinned entry point is missing, unreadable or changed; deliveries held",
+    );
+    throw new T3BridgeUnavailableError(
+      "re-register T3 bridge: pinned entry point is unavailable or changed",
+    );
   }
   async call(name: string, args: Record<string, unknown>): Promise<unknown> {
     const targets = [this.config, ...this.config.fallbackTargets];

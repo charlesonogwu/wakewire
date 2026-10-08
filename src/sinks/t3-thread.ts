@@ -3,6 +3,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { z } from "zod";
 import type { Logger } from "../logging.js";
+import { T3BridgeUnavailableError } from "./t3-mcp.js";
 import {
   type AgentAdapter,
   BusyError,
@@ -164,6 +165,7 @@ export class T3ThreadAdapter implements AgentAdapter {
         throw new PermanentError("Delivery identity reused with different content");
       const targetId = receipt.target_thread_id ?? threadId;
       if (receipt.state === "sent") return { threadId: targetId };
+      if (await this.reconcile(opts.deliveryId, hash, targetId)) return { threadId: targetId };
       throw this.uncertain(opts.deliveryId, targetId);
     }
     let selected: T3Target | undefined;
@@ -227,9 +229,82 @@ export class T3ThreadAdapter implements AgentAdapter {
         "WakeWire delivery projected in T3",
       );
       return { threadId: selected.threadId };
-    } catch {
+    } catch (error) {
+      if (error instanceof T3BridgeUnavailableError) {
+        // The pinned client proves it rejected the call BEFORE opening a
+        // transport. Release only our own unsent claim; ambiguous calls never
+        // take this path and retain their durable fence.
+        this.db
+          .prepare("DELETE FROM t3_receipts WHERE id=? AND hash=? AND state='sending'")
+          .run(opts.deliveryId, hash);
+        throw error;
+      }
+      if (await this.reconcile(opts.deliveryId, hash, selected.threadId))
+        return { threadId: selected.threadId };
       throw this.uncertain(opts.deliveryId, selected.threadId);
     }
+  }
+  /** Reconciliation only reads the recorded target. An absent marker NEVER
+   * authorizes another send or a fallback, including a crash before submission. */
+  private async reconcile(deliveryId: string, hash: string, threadId: string): Promise<boolean> {
+    const target = [this.config, ...this.config.fallbackTargets].find(
+      (candidate) => candidate.threadId === threadId,
+    );
+    if (!target) return false;
+    try {
+      await this.verify(target);
+      const marker = `[wakewire-delivery:${JSON.stringify(deliveryId)}]`;
+      const seen = new Set<string>();
+      let beforeCursor: string | undefined;
+      for (let page = 0; page < 20; page++) {
+        const result = z
+          .object({
+            threadId: z.literal(threadId),
+            environmentId: z.literal(target.environmentId),
+            messages: z.array(z.object({ role: z.string(), text: z.string() })),
+            page: z
+              .object({
+                hasMore: z.boolean().optional(),
+                beforeCursor: z.string().nullable().optional(),
+              })
+              .nullable()
+              .optional(),
+          })
+          .parse(
+            unpack(
+              await this.client.call("get_thread", {
+                threadId,
+                turnLimit: 50,
+                includeActivities: false,
+                ...(beforeCursor ? { beforeCursor } : {}),
+              }),
+            ),
+          );
+        if (
+          result.messages.some(
+            (message) => message.role === "user" && message.text.includes(marker),
+          )
+        ) {
+          this.db
+            .prepare(
+              "UPDATE t3_receipts SET state='sent' WHERE id=? AND hash=? AND state='sending'",
+            )
+            .run(deliveryId, hash);
+          this.logger.info(
+            { deliveryId, threadId, status: "sent" },
+            "T3 delivery reconciled from projected user marker; no resend",
+          );
+          return true;
+        }
+        const next = result.page?.beforeCursor;
+        if (!result.page?.hasMore || !next || seen.has(next)) return false;
+        seen.add(next);
+        beforeCursor = next;
+      }
+    } catch {
+      /* A read failure is not evidence of delivery or permission to resend. */
+    }
+    return false;
   }
   private uncertain(deliveryId: string, threadId: string) {
     this.logger.error(

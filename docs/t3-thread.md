@@ -6,6 +6,16 @@
 over MCP stdio, pinning its entry point by SHA-256. The bridge discovers existing
 local credentials; do not copy tokens or private provider bindings into registration.
 
+Missing, unreadable or checksum-mismatched bridge files do not prevent daemon
+startup. Calls log `re-register T3 bridge` and raise UnreachableError so the queue
+holds and retries; `probe()` reports false. An operator verifies the installed
+bridge, updates its registered path/hash, and restarts the intended daemon to load
+that registration. Never automatically trust a new checksum. Malformed hashes and
+relative paths remain permanent configuration errors.
+If the pin changes immediately before submission, the client proves no transport
+was opened: only that unsent claim is released for retry. A timeout or any other
+ambiguous send never releases its receipt.
+
 The primary fields preserve the deployed registration shape. Optional
 `fallbackTargets` adds ordered alternatives, each with its own complete identity:
 
@@ -48,6 +58,11 @@ reachability without sending a message.
 
 A session or latest turn in `error`, or attention state `error`, advances to the
 next registered target. If all providers/sessions failed, the queue holds for retry.
+Fallbacks must never perform review of the PR they implement. For Lash & Luxe,
+Solider (`a8cd2ec8-24b2-4b94-bcbe-9bf075aabd7b`) is primary and the orchestrator
+(`75f3174e-5df9-4c24-89a1-4c6aee1f93c3`) is the routing fallback. The orchestrator
+re-routes the wake to a suitable owner; it does not self-review. A PR's assigned
+reviewer must not become its fallback implementer without a new independent reviewer.
 Human approval, input and plan requests hold with `BusyError`; they are never
 bypassed through a fallback. The deployed allowlist is preserved: attention must
 be `working`, `done` or `idle`, and session status `running`, `ready` or `stopped`.
@@ -77,7 +92,11 @@ three-column receipt tables migrate without discarding records; old receipts
 refer to the primary. Successful receipts return the original target after restart.
 Prompts include `[wakewire-delivery:"DELIVERY_ID"]` to support manual inspection.
 
-Any ambiguous send, unverified projection or pending receipt throws PermanentError:
+After an ambiguous send, unverified projection or pending receipt, the sink makes
+a read-only reconciliation attempt on the recorded target: verify its identities,
+then inspect up to 20 pages of 50 recent turns for a **user** message containing the
+exact delivery marker. A match marks the receipt sent and returns success without
+calling `send_message`. Otherwise it remains uncertain and throws PermanentError:
 **never resend and never switch to a fallback after possible submission**. The sink
 emits an error log with delivery ID, selected thread and `status: "uncertain"`.
 The existing queue persists `status: "failed"` and the reconciliation reason,
@@ -85,6 +104,13 @@ visible via authenticated `GET /api/deliveries?status=failed` and delivery histo
 The failed item releases its FIFO slot so later items continue. Completion-monitor
 attempts also log uncertainty and transition the existing job to `needs-attention`.
 No additional queue, status store or periodic Desktop heartbeat is introduced.
+
+The branch owner or orchestrator investigates uncertainty by joining the failed
+delivery row to the log's delivery ID and selected thread, then inspecting that
+thread for the marker. The CompletionMonitor's attention/follow-up wakes or the
+next actionable GitHub event re-wake the owner under the existing exact-SHA gates;
+they are not proof the earlier wake was delivered. A pending receipt can be retried
+for read-only reconciliation, but absent evidence always remains uncertain.
 
 Inspect the selected thread and receipt before any manual reconciliation. Do not
 blindly replay a failed queue item: replay creates a new delivery identity. Do not
@@ -99,6 +125,8 @@ justify sending the same wake to another provider because acceptance is uncertai
 - Explicit unknown-thread PermanentError classification, with sanitized error text.
 - Lash & Luxe CoordinationCompletionMonitor wiring instead of MR T's issue gate.
 - Database closure in `finally` even if MCP shutdown fails.
+- Recoverable bridge-pin failures with explicit re-registration logs.
+- Read-only marker reconciliation of ambiguous sends and pending receipts.
 
 The direct programmatic-client command-replay approach from the first PR revision
 is removed. Conservative pending-receipt behavior is intentional. Tests use fake

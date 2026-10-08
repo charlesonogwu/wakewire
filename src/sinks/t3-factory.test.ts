@@ -31,7 +31,7 @@ const config: DaemonConfig = {
   apiPort: 0,
   apiToken: "test",
 };
-function registration(coordination?: object) {
+function registration(coordination?: object, mismatch = false) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "wakewire-t3-factory-"));
   dirs.push(dir);
   const file = path.join(dir, "registration.json");
@@ -45,9 +45,9 @@ function registration(coordination?: object) {
       projectId: "project",
       cwd: dir,
       serverPath,
-      serverSha256: createHash("sha256")
-        .update("// synthetic bridge, never executed")
-        .digest("hex"),
+      serverSha256: mismatch
+        ? "0".repeat(64)
+        : createHash("sha256").update("// synthetic bridge, never executed").digest("hex"),
       stateFile: path.join(dir, "receipts.db"),
       inheritPermissions: true,
       ...(coordination ? { coordination } : {}),
@@ -65,6 +65,12 @@ it("creates the T3 sink without loading credentials at factory time", () => {
   const adapter = createAdapter(config, pino({ level: "silent" }));
   adapters.push(adapter);
   expect(adapter).toBeInstanceOf(T3ThreadAdapter);
+});
+it("starts the adapter with a mismatched pin and reports an unreachable probe", async () => {
+  registration(undefined, true);
+  const adapter = createAdapter(config, pino({ level: "silent" }));
+  adapters.push(adapter);
+  await expect(adapter.probe()).resolves.toBe(false);
 });
 it("wraps T3 in the existing coordination filter and completion monitor", async () => {
   registration({
