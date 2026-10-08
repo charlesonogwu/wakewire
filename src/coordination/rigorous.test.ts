@@ -173,3 +173,53 @@ it("manual block, wrong actor trust, fork and closed PR remain gated", () => {
   const split = { ...config, trustedAuthorIds: { codex: ["217436545"], hermes: ["222"] } };
   expect(evaluateCoordination(ready, split).stage).toBe("challenge:peer");
 });
+
+const readiness = record(
+  "agent-readiness:v1",
+  'readiness-id: ready-130\nimpacts-json: ["website"]',
+  5,
+);
+const notificationConfig = {
+  ...config,
+  orchestratorThreadId: "75f3174e-5df9-4c24-89a1-4c6aee1f93c3",
+};
+it("notifies readiness only after current trusted verification and only with a configured orchestrator", () => {
+  const complete = [evidence, challenge, response, verdict, verification, readiness];
+  const decision = evaluateCoordination(snapshot(complete), notificationConfig);
+  expect(decision.action).toBe("ready");
+  expect(decision).toMatchObject({
+    readiness: {
+      commentId: readiness.id,
+      url: `https://github.com/charlesonogwu/lash-luxe-nyc/pull/130#issuecomment-${readiness.id}`,
+      impacts: ["website"],
+    },
+  });
+  expect(evaluateCoordination(snapshot(complete), config).action).toBe("wait");
+  for (const checks of ["pending", "failure"] as const)
+    expect(evaluateCoordination({ ...snapshot(complete), checks }, notificationConfig).action).toBe(
+      "wait",
+    );
+  expect(
+    evaluateCoordination(
+      snapshot([evidence, challenge, response, verdict, readiness]),
+      notificationConfig,
+    ).action,
+  ).toBe("verification:owner");
+  for (const invalid of [
+    { ...readiness, authorId: "999" },
+    { ...readiness, body: readiness.body.replaceAll(sha, "a".repeat(40)) },
+  ])
+    expect(
+      evaluateCoordination(snapshot([...complete.slice(0, -1), invalid]), notificationConfig)
+        .action,
+    ).toBe("wait");
+  expect(
+    evaluateCoordination(
+      snapshot([
+        ...complete.slice(0, -1),
+        { ...readiness, body: readiness.body.replace('["website"]', '["pi"]') },
+      ]),
+      notificationConfig,
+    ).action,
+  ).toBe("blocked");
+});

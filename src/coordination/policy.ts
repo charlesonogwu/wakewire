@@ -25,11 +25,13 @@ export interface CoordinationConfig {
   trustedAuthorIds: Readonly<Record<Agent, readonly string[]>>;
   waitingLabel: string;
   prepushEnabled?: boolean;
+  orchestratorThreadId?: string | undefined;
 }
 export interface CoordinationResult {
   action: "ignore" | "wait" | "fix" | "review" | "verify" | "ready" | "blocked" | Stage;
   stage?: string;
   stageKey?: string;
+  readiness?: { commentId: number; url: string; impacts: string[] };
   reason: string;
   headSha: string | null;
   owner: Agent | null;
@@ -134,6 +136,7 @@ export function evaluateCoordination(
       ...result(rigorous.action, rigorous.reason),
       stage: rigorous.stage,
       stageKey: rigorous.stageKey,
+      ...(rigorous.readiness ? { readiness: rigorous.readiness } : {}),
     };
   }
   const approvalLabels = agents.map((agent) => `approved:${agent}`);

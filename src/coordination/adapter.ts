@@ -28,6 +28,7 @@ export const CoordinationConfigSchema = z
     expectedRepository: RepositorySchema,
     localAgent: z.literal("codex"),
     prepushEnabled: z.boolean().default(false),
+    orchestratorThreadId: z.string().uuid().optional(),
     trustedAuthorIds: z.object({ codex: AuthorIds, hermes: AuthorIds }).strict(),
     waitingLabel: z
       .string()
@@ -183,6 +184,17 @@ export class CoordinationAdapter implements AgentAdapter {
       }
     }
     if (decision.action === "wait" || decision.action === "ignore") return { threadId };
+    if (decision.action === "ready" && decision.readiness && this.config.orchestratorThreadId) {
+      const { commentId, url, impacts } = decision.readiness;
+      const deliveryId = `coordination:ready:${hash([snapshot.repository, number, decision.headSha, commentId])}`;
+      const prompt =
+        `Readiness reached for PR #${number} at exact head ${decision.headSha}. Do not merge. ` +
+        `Send the orchestrator thread ${this.config.orchestratorThreadId} a T3 message with the PR, exact SHA, readiness comment URL and declared impacts, then stop.\n` +
+        `PR: https://github.com/${snapshot.repository}/pull/${number}\nExact SHA: ${decision.headSha}\nReadiness comment URL: ${url}\nDeclared impacts: ${impacts.join(", ")}\n` +
+        "This notification is not merge or deployment authority. Do not post approval records or operate production.";
+      // One-shot through the existing durable sink receipt; never register a completion job.
+      return this.inner.deliverToThread(threadId, prompt, { ...opts, deliveryId });
+    }
     const evidence = latestEvidence(snapshot, this.config);
     const context = {
       repository: this.config.expectedRepository,

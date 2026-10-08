@@ -99,7 +99,8 @@ const schemas = {
 type Marker = keyof typeof schemas;
 type Entry = { marker: Marker; fields: Record<string, unknown>; comment: ReviewComment };
 export interface RigorousDecision {
-  action: Stage | "wait" | "blocked";
+  action: Stage | "wait" | "blocked" | "ready";
+  readiness?: { commentId: number; url: string; impacts: string[] };
   reason: string;
   stage: string;
   stageKey: string;
@@ -277,6 +278,27 @@ export function evaluateRigorous(
   const verification = next("agent-owner-verification:v1");
   if (!verification) return stage("verification:owner", owner);
   if (verification.fields.owner !== owner) return blocked("Verification owner mismatch");
+  const readiness = next("agent-readiness:v1");
+  if (
+    readiness &&
+    JSON.stringify(readiness.fields["impacts-json"]) !== JSON.stringify([...declared].sort())
+  )
+    return blocked("Readiness impacts mismatch");
+  if (readiness && config.orchestratorThreadId && snapshot.checks === "success") {
+    return {
+      ...done(
+        "ready",
+        "waiting:charles",
+        "Current-head readiness reached",
+        String(readiness.comment.id),
+      ),
+      readiness: {
+        commentId: readiness.comment.id,
+        url: `https://github.com/${snapshot.repository}/pull/${snapshot.number}#issuecomment-${readiness.comment.id}`,
+        impacts: [...declared].sort(),
+      },
+    };
+  }
   return done(
     "wait",
     "waiting:charles",
