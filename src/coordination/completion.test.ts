@@ -6,7 +6,11 @@ import type { AgentAdapter } from "../sinks/types.js";
 import { BusyError, PermanentError } from "../sinks/types.js";
 import { CoordinationAdapter } from "./adapter.js";
 import { CoordinationCompletionMonitor, latestTrustedVote } from "./completion.js";
-import type { CoordinationConfig, CoordinationSnapshot } from "./policy.js";
+import {
+  type CoordinationConfig,
+  type CoordinationSnapshot,
+  evaluateCoordination,
+} from "./policy.js";
 
 const oldHead = "a".repeat(40);
 const newHead = "b".repeat(40);
@@ -520,4 +524,69 @@ describe("durable coordination completion", () => {
     await expect(close).resolves.toBeUndefined();
     expect(f.sent).not.toHaveBeenCalled();
   });
+});
+
+it("completes rigorous owner evidence on stage advancement without legacy votes", async () => {
+  const f = fixture();
+  const snapshot = f.snapshot();
+  snapshot.number = 7;
+  snapshot.labels = ["agent:codex"];
+  const route = {
+    id: 50,
+    authorId: "101",
+    updatedAt: "2026-09-21T00:00:00Z",
+    body: `<!-- agent-routing:v2\nevent-key: example/project:7:${oldHead}:evidence:owner:none\nactor: codex\nstage: evidence:owner\nhead-sha: ${oldHead}\n-->`,
+  };
+  snapshot.comments = [route];
+  f.update(snapshot);
+  const decision = evaluateCoordination(snapshot, config);
+  expect(decision.action).toBe("evidence:owner");
+  const monitor = f.create();
+  const id = monitor.register({
+    ...f.job,
+    action: "evidence:owner",
+    baselineVote: decision.stageKey ?? null,
+  });
+  monitor.acknowledge(id);
+  f.advance(5 * 60_000);
+  await monitor.tick();
+  expect(monitor.list()[0]?.state).toBe("pending");
+  snapshot.comments = [
+    ...snapshot.comments,
+    {
+      id: 51,
+      authorId: "101",
+      updatedAt: "2026-09-21T00:06:00Z",
+      body: `<!-- agent-owner-evidence:v1\npr: 7\nhead-sha: ${oldHead}\nowner: codex\nevidence-id: e1\nimpacts-json: ["website"]\nsummary: Tests passed.\n-->`,
+    },
+  ];
+  f.update(snapshot);
+  f.advance(5 * 60_000);
+  await monitor.tick();
+  expect(monitor.list()[0]?.state).toBe("complete");
+  await monitor.close();
+});
+
+it("rigorous completion supersedes a changed SHA and separates revised same-stage jobs", async () => {
+  const f = fixture();
+  const monitor = f.create();
+  const first = {
+    ...f.job,
+    action: "response:owner" as const,
+    baselineVote: "example/project:7:head:response:owner:1",
+  };
+  const id = monitor.register(first);
+  expect(
+    monitor.register({ ...first, baselineVote: "example/project:7:head:response:owner:2" }),
+  ).not.toBe(id);
+  const moved = f.snapshot();
+  moved.headSha = newHead;
+  moved.comments = [];
+  moved.labels = ["agent:codex"];
+  f.update(moved);
+  monitor.acknowledge(id);
+  f.advance(5 * 60_000);
+  await monitor.tick();
+  expect(monitor.list().find((job) => job.id === id)?.state).toBe("superseded");
+  await monitor.close();
 });

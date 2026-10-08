@@ -220,6 +220,7 @@ export class GithubSnapshotClient {
     if (pullIdentity(current) !== pullIdentity(pr))
       throw new Error("GitHub PR changed during snapshot collection");
     return {
+      number,
       repository: this.repository,
       state: pr.state,
       headSha: sha,

@@ -5,8 +5,9 @@ import { BusyError, PermanentError, UnreachableError } from "../sinks/types.js";
 import type { CoordinationConfig, CoordinationSnapshot } from "./policy.js";
 import { evaluateCoordination } from "./policy.js";
 import { parseReview } from "./review.js";
+import { isStage, type Stage } from "./rigorous.js";
 
-type Action = "fix" | "review" | "verify";
+type Action = "fix" | "review" | "verify" | Stage;
 type JobState = "pending" | "complete" | "superseded" | "needs-attention";
 export interface CompletionJobInput {
   repository: string;
@@ -54,7 +55,15 @@ type SnapshotReader = Pick<import("./github.js").GithubSnapshotClient, "read">;
 const sha = /^[a-f0-9]{40}$/;
 const keyFor = (job: CompletionJobInput) =>
   createHash("sha256")
-    .update(JSON.stringify([job.repository, job.number, job.headSha, job.action]))
+    .update(
+      JSON.stringify([
+        job.repository,
+        job.number,
+        job.headSha,
+        job.action,
+        ...(isStage(job.action) ? [job.baselineVote] : []),
+      ]),
+    )
     .digest("hex");
 
 export function latestTrustedVote(snapshot: CoordinationSnapshot, config: CoordinationConfig) {
@@ -130,11 +139,13 @@ export class CoordinationCompletionMonitor {
       !Number.isSafeInteger(input.number) ||
       input.number <= 0 ||
       !sha.test(input.headSha) ||
-      !["fix", "review", "verify"].includes(input.action) ||
+      (!isStage(input.action) && !["fix", "review", "verify"].includes(input.action)) ||
       !input.threadId ||
       !input.firstPrompt ||
       !input.firstDeliveryId ||
-      (input.baselineVote !== null && !/^\[\d+,\d+\]$/.test(input.baselineVote))
+      (input.baselineVote !== null &&
+        !isStage(input.action) &&
+        !/^\[\d+,\d+\]$/.test(input.baselineVote))
     )
       throw new PermanentError("Invalid coordination completion job");
     const id = keyFor(input);
@@ -281,7 +292,21 @@ export class CoordinationCompletionMonitor {
       this.finish(row.id, "needs-attention", decision.reason);
       return;
     }
-    const vote = latestTrustedVote(snapshot, this.options.config);
+    if (isStage(row.action)) {
+      if (snapshot.headSha !== row.head_sha) {
+        this.finish(row.id, "superseded", "Rigorous head changed");
+        return;
+      }
+      if (decision.stage && decision.stage !== row.action) {
+        this.finish(row.id, "complete", "Rigorous stage advanced in trusted GitHub records");
+        return;
+      }
+      if (decision.stageKey !== row.baseline_vote) {
+        this.finish(row.id, "superseded", "Rigorous stage evidence changed");
+        return;
+      }
+    }
+    const vote = isStage(row.action) ? undefined : latestTrustedVote(snapshot, this.options.config);
     let newVote = false;
     if (vote) {
       if (row.baseline_vote === null) {

@@ -16,6 +16,7 @@ import { createAdapter } from "../sinks/factory.js";
 import type { DeliveryOptions } from "../sinks/types.js";
 import { trimGithubEvent } from "../sources/github/trim.js";
 import { CoordinationAdapter, CoordinationConfigSchema } from "./adapter.js";
+import { CoordinationCompletionMonitor } from "./completion.js";
 import { GithubSnapshotClient } from "./github.js";
 import type { Agent, CoordinationConfig } from "./policy.js";
 
@@ -897,4 +898,83 @@ describe("private registration opt-in", () => {
       () => new CoordinationAdapter(coordination as CoordinationConfig, f.snapshots, inner),
     ).toThrow();
   });
+});
+
+it("delivers rigorous prompts and drops old-head stage webhooks", async () => {
+  const f = fixture();
+  f.state.labels = ["agent:codex"];
+  const routing = `<!-- agent-routing:v2\nevent-key: example/project:7:${sha}:evidence:owner:none\nactor: codex\nstage: evidence:owner\nhead-sha: ${sha}\n-->`;
+  f.state.comments = [{ ...vote("codex"), body: routing }];
+  await f.adapter.deliverToThread("test-thread", "ignored", opts());
+  expect(f.sent[0]?.prompt).toContain("evidence:owner");
+  expect(f.sent[0]?.prompt).toContain("agent-owner-evidence:v1");
+  const old = {
+    ...opts("stale"),
+    event: {
+      ...event("stale"),
+      payload: { ...event().payload, commentBody: routing.replaceAll(sha, "b".repeat(40)) },
+    },
+  };
+  await f.adapter.deliverToThread("test-thread", "ignored", old);
+  expect(f.sent).toHaveLength(1);
+});
+
+it("delivers readiness once per comment with configured destination and no completion resumes", async () => {
+  const configured = { ...config, orchestratorThreadId: "75f3174e-5df9-4c24-89a1-4c6aee1f93c3" };
+  const f = fixture(configured);
+  f.state.labels = ["agent:codex"];
+  const stages = [
+    ["agent-owner-evidence:v1", 'owner: codex\nevidence-id: e1\nimpacts-json: ["website"]'],
+    ["agent-challenge:v1", "reviewer: hermes\nchallenge-id: c1\nfindings-json: []"],
+    ["agent-response:v1", "owner: codex\nchallenge-id: c1\nresponses-json: []"],
+    ["agent-review:v2", "reviewer: hermes\nchallenge-id: c1\ndecision: approve"],
+    ["agent-owner-verification:v1", "owner: codex\nverification-id: v1"],
+    ["agent-readiness:v1", 'readiness-id: ready-7\nimpacts-json: ["website"]'],
+  ];
+  f.state.comments = stages.map(([marker, fields], i) => ({
+    id: 20 + i,
+    user: { id: fields?.includes("reviewer: hermes") ? 202 : 101 },
+    updated_at: `2026-09-10T10:00:0${i}Z`,
+    body: `<!-- ${marker}\npr: 7\nhead-sha: ${sha}\n${fields}\nsummary: Verified synthetic change.\n-->`,
+  }));
+  const inner = new CodexDesktopAdapter(f.desktopConfig, f.client);
+  cleanup.push(() => inner.close());
+  const monitor = new CoordinationCompletionMonitor({
+    dbFile: path.join(f.dir, "completion.db"),
+    config: configured,
+    snapshots: f.snapshots,
+    inner,
+  });
+  cleanup.push(() => monitor.close());
+  const adapter = new CoordinationAdapter(configured, f.snapshots, inner, monitor);
+  await adapter.deliverToThread("test-thread", "ignored", opts());
+  await adapter.deliverToThread("test-thread", "ignored", opts("duplicate"));
+  expect(f.sent).toHaveLength(1);
+  expect(f.sent[0]?.prompt).toContain(`Readiness reached for PR #7 at exact head ${sha}`);
+  expect(f.sent[0]?.prompt).toContain(configured.orchestratorThreadId);
+  expect(f.sent[0]?.prompt).toContain("#issuecomment-25");
+  expect(f.sent[0]?.prompt).toContain("Declared impacts: website");
+  expect(f.sent[0]?.prompt).toContain("Do not merge");
+  expect(monitor.list()).toEqual([]);
+  await monitor.tick();
+  expect(f.sent).toHaveLength(1);
+  // Editing prose, or legacy chatter, must not generate another receipt identity.
+  const last = f.state.comments.at(-1);
+  if (!last) throw new Error("missing fixture");
+  last.body = last.body.replace("Verified synthetic change.", "Updated readiness prose.");
+  await adapter.deliverToThread("test-thread", "ignored", opts("edit"));
+  expect(f.sent).toHaveLength(1);
+});
+it("validates the optional orchestrator UUID in registration", () => {
+  expect(CoordinationConfigSchema.safeParse(config).success).toBe(true);
+  expect(
+    CoordinationConfigSchema.safeParse({
+      ...config,
+      orchestratorThreadId: "75f3174e-5df9-4c24-89a1-4c6aee1f93c3",
+    }).success,
+  ).toBe(true);
+  for (const value of ["", "thread; execute", null])
+    expect(
+      CoordinationConfigSchema.safeParse({ ...config, orchestratorThreadId: value }).success,
+    ).toBe(false);
 });
