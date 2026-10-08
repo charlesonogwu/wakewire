@@ -6,7 +6,7 @@ import { assertLoopbackWsUrl } from "../sinks/codex-app-server.js";
 
 const KNOWN: Record<string, string> = {
   [settingKeys.adapter]:
-    "agent sink: codex-app-server (default) | codex-sdk | codex-exec | codex-desktop (experimental) | muse-exec",
+    "agent sink: codex-app-server (default) | codex-sdk | codex-exec | codex-desktop (experimental) | muse-exec | t3-thread",
   [settingKeys.codexPath]: "override the codex binary path",
   [settingKeys.musePath]: "override the muse binary path (muse-exec adapter)",
   [settingKeys.museYolo]: "muse-exec only: set to 1 to pass --yolo (off by default)",
@@ -52,7 +52,7 @@ export async function configSet(key: string, value: string): Promise<void> {
     const parsed = AdapterNameSchema.safeParse(value);
     if (!parsed.success) {
       console.error(
-        `invalid adapter "${value}" — use codex-sdk | codex-app-server | codex-exec | codex-desktop | muse-exec`,
+        `invalid adapter "${value}" — use codex-sdk | codex-app-server | codex-exec | codex-desktop | muse-exec | t3-thread`,
       );
       process.exitCode = 1;
       return;

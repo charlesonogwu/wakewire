@@ -11,10 +11,32 @@ import { CodexExecAdapter } from "./codex-exec.js";
 import { CodexSdkAdapter } from "./codex-sdk.js";
 import { RefreshingDesktopMcpClient } from "./desktop-refreshing-client.js";
 import { MuseExecAdapter } from "./muse-exec.js";
+import { InstalledT3Client, T3RegistrationSchema, T3ThreadAdapter } from "./t3-thread.js";
 import type { AgentAdapter } from "./types.js";
 
 export function createAdapter(config: DaemonConfig, logger: Logger): AgentAdapter {
   switch (config.adapter) {
+    case "t3-thread": {
+      const file = process.env.WAKEWIRE_T3_REGISTRATION;
+      if (!file) throw new Error("T3 adapter requires explicit local registration");
+      const registration = T3RegistrationSchema.parse(JSON.parse(readFileSync(file, "utf8")));
+      const t3 = new T3ThreadAdapter(
+        registration,
+        new InstalledT3Client(registration.bridgePath),
+        logger,
+      );
+      if (!registration.coordination) return t3;
+      const snapshots = new GithubSnapshotClient(registration.coordination.expectedRepository);
+      const completion = new CoordinationCompletionMonitor({
+        dbFile: registration.stateFile,
+        config: registration.coordination,
+        snapshots,
+        inner: t3,
+      });
+      const adapter = new CoordinationAdapter(registration.coordination, snapshots, t3, completion);
+      completion.start();
+      return adapter;
+    }
     case "codex-desktop": {
       const file = process.env.WAKEWIRE_DESKTOP_REGISTRATION;
       if (!file) throw new Error("Desktop adapter requires explicit local registration");
