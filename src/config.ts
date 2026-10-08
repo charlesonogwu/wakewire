@@ -8,6 +8,7 @@ export const AdapterNameSchema = z.enum([
   "codex-exec",
   "codex-desktop",
   "muse-exec",
+  "t3-thread",
 ]);
 export type AdapterName = z.infer<typeof AdapterNameSchema>;
 

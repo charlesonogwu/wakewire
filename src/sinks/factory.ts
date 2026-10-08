@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import path from "node:path";
 import { z } from "zod";
 import type { DaemonConfig } from "../config.js";
 import { CoordinationAdapter, CoordinationConfigSchema } from "../coordination/adapter.js";
@@ -11,10 +12,39 @@ import { CodexExecAdapter } from "./codex-exec.js";
 import { CodexSdkAdapter } from "./codex-sdk.js";
 import { RefreshingDesktopMcpClient } from "./desktop-refreshing-client.js";
 import { MuseExecAdapter } from "./muse-exec.js";
+import { T3McpClient } from "./t3-mcp.js";
+import { T3ConfigSchema, T3ThreadAdapter } from "./t3-thread.js";
 import type { AgentAdapter } from "./types.js";
 
 export function createAdapter(config: DaemonConfig, logger: Logger): AgentAdapter {
   switch (config.adapter) {
+    case "t3-thread": {
+      const file = process.env.WAKEWIRE_T3_REGISTRATION;
+      if (!file) throw new Error("T3 adapter requires explicit local registration");
+      const registration = T3ConfigSchema.safeExtend({
+        serverPath: z.string().refine(path.isAbsolute),
+        serverSha256: z.string().regex(/^[a-f0-9]{64}$/),
+        coordination: CoordinationConfigSchema.optional(),
+      }).parse(JSON.parse(readFileSync(file, "utf8")));
+      const {
+        serverPath: _serverPath,
+        serverSha256: _serverSha256,
+        coordination: _coordination,
+        ...targetConfig
+      } = registration;
+      const t3 = new T3ThreadAdapter(targetConfig, new T3McpClient(registration, logger), logger);
+      if (!registration.coordination) return t3;
+      const snapshots = new GithubSnapshotClient(registration.coordination.expectedRepository);
+      const completion = new CoordinationCompletionMonitor({
+        dbFile: registration.stateFile,
+        config: registration.coordination,
+        snapshots,
+        inner: t3,
+      });
+      const adapter = new CoordinationAdapter(registration.coordination, snapshots, t3, completion);
+      completion.start();
+      return adapter;
+    }
     case "codex-desktop": {
       const file = process.env.WAKEWIRE_DESKTOP_REGISTRATION;
       if (!file) throw new Error("Desktop adapter requires explicit local registration");

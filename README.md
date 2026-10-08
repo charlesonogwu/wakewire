@@ -153,6 +153,9 @@ WakeWire talks to Codex through an adapter (config: settings key `sink.adapter`)
   `wakewire config set sink.adapter codex-sdk` (then restart the daemon).
 - **`codex-exec`** — plain `codex exec` shell-out against your installed codex;
   maximum-compatibility last resort.
+- **`t3-thread`** — deliver to explicitly registered T3 Code threads, with ordered
+  session fallbacks, queued delivery, and durable retry reconciliation.
+  See [T3 registration and recovery](docs/t3-thread.md).
 - **`muse-exec`** — headless `muse exec` shell-out against your installed Muse
   Code CLI: `wakewire config set sink.adapter muse-exec` (then restart the
   daemon). WakeWire thread ids map 1:1 onto Muse session ids; prompts go via
