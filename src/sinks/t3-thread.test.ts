@@ -1,290 +1,375 @@
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import Database from "better-sqlite3";
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type T3Client, T3RegistrationSchema, T3ThreadAdapter } from "./t3-thread.js";
-import { PermanentError, UnreachableError } from "./types.js";
+import { DeliveryQueue } from "../core/queue.js";
+import { type ApiContext, createApi } from "../daemon/api.js";
+import { openDatabase } from "../db/db.js";
+import { createStores } from "../db/repos.js";
+import { T3ConfigSchema, T3ThreadAdapter, type T3ToolClient } from "./t3-thread.js";
+import { BusyError, PermanentError, UnreachableError } from "./types.js";
 
-const primary = "11111111-1111-4111-8111-111111111111";
-const fallback = "22222222-2222-4222-8222-222222222222";
 const opts = { sandbox: "workspace-write" as const, deliveryId: "delivery-one" };
 const dirs: string[] = [];
 const adapters: T3ThreadAdapter[] = [];
 afterEach(async () => {
-  vi.useRealTimers();
   for (const adapter of adapters.splice(0)) await adapter.close();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
-
+const packed = (data: unknown) => ({ content: [{ type: "text", text: JSON.stringify(data) }] });
 function fixture() {
   const dir = mkdtempSync(path.join(os.tmpdir(), "wakewire-t3-"));
   dirs.push(dir);
+  const primary = { threadId: "primary", environmentId: "env-1", projectId: "project-1", cwd: dir };
+  const fallback = {
+    threadId: "fallback",
+    environmentId: "env-2",
+    projectId: "project-2",
+    cwd: dir,
+  };
   const config = {
-    threadIds: [primary, fallback],
-    bridgePath: path.join(dir, "bridge.js"),
+    ...primary,
+    fallbackTargets: [fallback],
     stateFile: path.join(dir, "receipts.db"),
     inheritPermissions: true as const,
   };
-  const threads = new Map(
-    [primary, fallback].map((id) => [
-      id,
+  const states = new Map(
+    [primary, fallback].map((target) => [
+      target.threadId,
       {
-        id,
-        session: { status: "idle" },
-        runtimeMode: "approval-required",
-        interactionMode: "plan",
-        messages: [] as { id: string; role: string; text: string }[],
+        threadId: target.threadId,
+        environmentId: target.environmentId,
+        attention: "idle",
+        session: { status: "ready" },
+        latestTurn: { state: "completed" },
       },
     ]),
   );
-  const accepted = new Set<string>();
-  const client: T3Client = {
-    probe: vi.fn(async () => ({})),
-    environmentStatuses: vi.fn(async () => ({ environments: [{ reachable: true }] })),
-    thread: vi.fn(async (id) => {
-      const thread = threads.get(id);
-      if (!thread)
-        throw new Error(`No thread with id ${id} exists in any reachable T3 environment.`);
-      return { thread, page: { hasMore: false } };
-    }),
-    dispatch: vi.fn(async (command) => {
-      if (!accepted.has(command.commandId)) {
-        accepted.add(command.commandId);
-        threads.get(command.threadId)?.messages.push({
-          id: command.message.messageId,
-          role: "user",
-          text: command.message.text,
+  const calls: { name: string; args: Record<string, unknown> }[] = [];
+  const client: T3ToolClient = {
+    async call(name, args) {
+      calls.push({ name, args });
+      if (name === "get_thread") return packed(states.get(String(args.threadId)));
+      if (name === "list_projects")
+        return packed({
+          projects: [primary, fallback].map((t) => ({ ...t, workspaceRoot: t.cwd })),
         });
-      }
-      return { sequence: 1 };
-    }),
+      if (name === "list_threads")
+        return packed({
+          threads: [primary, fallback].filter((t) => t.projectId === args.projectId),
+        });
+      if (name === "send_message")
+        return packed({
+          sent: true,
+          verified: true,
+          threadId: args.threadId,
+          environmentId: states.get(String(args.threadId))?.environmentId,
+          deliveryMode: "after-current",
+        });
+      throw new Error("Unexpected tool");
+    },
+    close: vi.fn(),
   };
   const logger = pino({ level: "silent" });
+  const error = vi.spyOn(logger, "error");
   const info = vi.spyOn(logger, "info");
   const adapter = new T3ThreadAdapter(config, client, logger);
   adapters.push(adapter);
-  const primaryThread = threads.get(primary);
-  if (!primaryThread) throw new Error("Missing fixture primary");
-  return { adapter, config, client, threads, primaryThread, accepted, info, logger };
+  const primaryState = states.get(primary.threadId);
+  const fallbackState = states.get(fallback.threadId);
+  if (!primaryState || !fallbackState) throw new Error("Missing fixture state");
+  return {
+    adapter,
+    config,
+    client,
+    primary,
+    fallback,
+    primaryState,
+    fallbackState,
+    calls,
+    logger,
+    error,
+    info,
+  };
 }
-
-describe("T3 thread delivery", () => {
-  it("projects a marked message with inherited modes and no new thread support", async () => {
+describe("ported T3 owner delivery", () => {
+  it.each(["sent", "sending"])("preserves deployed three-column %s receipts", async (state) => {
     const f = fixture();
-    expect(f.adapter.supportsNewThreads).toBe(false);
-    await expect(f.adapter.startThread()).rejects.toBeInstanceOf(PermanentError);
-    await expect(f.adapter.deliverToThread(primary, "hello", opts)).resolves.toEqual({
-      threadId: primary,
-    });
-    expect(f.client.dispatch).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: "thread.turn.start",
-        threadId: primary,
-        deliveryMode: "after-current",
-        runtimeMode: "approval-required",
-        interactionMode: "plan",
-        message: expect.objectContaining({ text: expect.stringContaining("delivery-one") }),
-      }),
+    const stateFile = path.join(f.primary.cwd, "legacy.db");
+    const db = new Database(stateFile);
+    db.exec("CREATE TABLE t3_receipts(id TEXT PRIMARY KEY,hash TEXT NOT NULL,state TEXT NOT NULL)");
+    db.prepare("INSERT INTO t3_receipts VALUES (?,?,?)").run(
+      opts.deliveryId,
+      createHash("sha256")
+        .update(JSON.stringify(["primary", "hello"]))
+        .digest("hex"),
+      state,
     );
+    db.close();
+    const migrated = new T3ThreadAdapter({ ...f.config, stateFile }, f.client, f.logger);
+    adapters.push(migrated);
+    const delivery = migrated.deliverToThread("primary", "hello", opts);
+    if (state === "sent") await expect(delivery).resolves.toEqual({ threadId: "primary" });
+    else await expect(delivery).rejects.toBeInstanceOf(PermanentError);
+    expect(f.calls).toHaveLength(0);
+  });
+  it("verifies identities and sends a marked after-current message", async () => {
+    const f = fixture();
+    expect(await f.adapter.probe()).toBe(true);
+    await expect(f.adapter.deliverToThread("primary", "hello", opts)).resolves.toEqual({
+      threadId: "primary",
+    });
+    expect(f.calls.find((c) => c.name === "send_message")?.args).toEqual({
+      threadId: "primary",
+      message: '[wakewire-delivery:"delivery-one"]\n\nhello',
+      deliveryMode: "after-current",
+    });
     expect(f.info).toHaveBeenCalledWith(
-      expect.objectContaining({ threadId: primary }),
+      expect.objectContaining({ threadId: "primary" }),
       expect.any(String),
     );
+    expect(f.adapter.supportsNewThreads).toBe(false);
+    await expect(f.adapter.startThread()).rejects.toBeInstanceOf(PermanentError);
   });
-  it("queues to a busy primary rather than using the fallback", async () => {
+  it("queues to a running primary as the compiled implementation does", async () => {
     const f = fixture();
-    f.primaryThread.session.status = "running";
-    await expect(f.adapter.deliverToThread(primary, "hello", opts)).resolves.toEqual({
-      threadId: primary,
+    f.primaryState.session.status = "running";
+    f.primaryState.attention = "working";
+    await expect(f.adapter.deliverToThread("primary", "hello", opts)).resolves.toEqual({
+      threadId: "primary",
     });
   });
-  it("uses the first usable fallback when the primary session errored", async () => {
+  it.each(["needs-approval", "needs-input", "plan-ready"])(
+    "holds %s without bypassing to fallback",
+    async (attention) => {
+      const f = fixture();
+      f.primaryState.attention = attention;
+      await expect(f.adapter.deliverToThread("primary", "hello", opts)).rejects.toBeInstanceOf(
+        BusyError,
+      );
+      expect(f.calls.some((c) => c.name === "send_message")).toBe(false);
+    },
+  );
+  it("holds starting session states", async () => {
     const f = fixture();
-    f.primaryThread.session.status = "error";
-    await expect(f.adapter.deliverToThread(primary, "hello", opts)).resolves.toEqual({
-      threadId: fallback,
-    });
+    f.primaryState.session.status = "starting";
+    await expect(f.adapter.deliverToThread("primary", "hello", opts)).rejects.toBeInstanceOf(
+      BusyError,
+    );
   });
-  it("holds when all sessions are errored", async () => {
+  it.each(["session", "provider"])(
+    "falls back after %s failure and verifies fallback identity",
+    async (failure) => {
+      const f = fixture();
+      if (failure === "session") f.primaryState.session.status = "error";
+      else f.primaryState.latestTurn.state = "error";
+      await expect(f.adapter.deliverToThread("primary", "hello", opts)).resolves.toEqual({
+        threadId: "fallback",
+      });
+      expect(f.calls).toContainEqual({
+        name: "list_threads",
+        args: { projectId: "project-2", limit: 100 },
+      });
+      expect(f.info).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: "fallback" }),
+        expect.any(String),
+      );
+    },
+  );
+  it("holds when every target has a provider error", async () => {
     const f = fixture();
-    for (const thread of f.threads.values()) thread.session.status = "error";
-    await expect(f.adapter.deliverToThread(primary, "hello", opts)).rejects.toBeInstanceOf(
+    f.primaryState.attention = "error";
+    f.fallbackState.attention = "error";
+    await expect(f.adapter.deliverToThread("primary", "hello", opts)).rejects.toBeInstanceOf(
       UnreachableError,
     );
-    expect(f.client.dispatch).not.toHaveBeenCalled();
   });
-  it("retries unreachable T3 and probes reachability without delivering", async () => {
+  it.each(["thread", "environment", "project", "cwd", "fallback"])(
+    "rejects %s identity mismatch before any write",
+    async (mismatch) => {
+      const f = fixture();
+      const read = f.client.call.bind(f.client);
+      f.client.call = async (name, args) => {
+        if (mismatch === "thread" && name === "get_thread")
+          return packed({ ...f.primaryState, threadId: "wrong" });
+        if (mismatch === "environment" && name === "get_thread")
+          return packed({ ...f.primaryState, environmentId: "wrong" });
+        if (mismatch === "project" && name === "list_threads") return packed({ threads: [] });
+        if (mismatch === "cwd" && name === "list_projects")
+          return packed({
+            projects: [
+              {
+                projectId: "project-1",
+                environmentId: "env-1",
+                workspaceRoot: path.join(f.primary.cwd, "wrong"),
+              },
+            ],
+          });
+        if (mismatch === "fallback") {
+          f.primaryState.session.status = "error";
+          if (name === "get_thread" && args.threadId === "fallback")
+            return packed({ ...f.fallbackState, environmentId: "wrong" });
+        }
+        return read(name, args);
+      };
+      await expect(f.adapter.deliverToThread("primary", "hello", opts)).rejects.toBeInstanceOf(
+        PermanentError,
+      );
+      expect(f.calls.some((c) => c.name === "send_message")).toBe(false);
+    },
+  );
+  it("retries an unreachable bridge without creating a receipt", async () => {
     const f = fixture();
-    vi.mocked(f.client.thread).mockRejectedValue(new Error("offline secret-token"));
-    vi.mocked(f.client.probe).mockRejectedValue(new Error("offline secret-token"));
+    const read = f.client.call;
+    f.client.call = async () => {
+      throw new Error("offline secret-token");
+    };
     expect(await f.adapter.probe()).toBe(false);
-    await expect(f.adapter.deliverToThread(primary, "hello", opts)).rejects.toThrow(
-      /^Cannot reach T3/,
+    await expect(f.adapter.deliverToThread("primary", "hello", opts)).rejects.toBeInstanceOf(
+      UnreachableError,
     );
-    expect(f.client.dispatch).not.toHaveBeenCalled();
+    f.client.call = read;
+    await expect(f.adapter.deliverToThread("primary", "hello", opts)).resolves.toEqual({
+      threadId: "primary",
+    });
   });
-  it("classifies unknown thread as permanent only with complete environment discovery", async () => {
+  it("classifies an explicit unknown-thread tool error as permanent", async () => {
     const f = fixture();
-    f.threads.delete(primary);
-    await expect(f.adapter.deliverToThread(primary, "hello", opts)).rejects.toBeInstanceOf(
+    f.client.call = async () => ({
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: "Error: No thread with id primary exists in any reachable T3 environment.",
+        },
+      ],
+    });
+    await expect(f.adapter.deliverToThread("primary", "hello", opts)).rejects.toBeInstanceOf(
       PermanentError,
     );
-    vi.mocked(f.client.environmentStatuses).mockResolvedValue({
-      environments: [{ reachable: false }],
-    });
-    await expect(f.adapter.deliverToThread(primary, "hello", opts)).rejects.toBeInstanceOf(
-      UnreachableError,
-    );
   });
-  it("reconciles a lost response across restart, without sending to a recovered primary", async () => {
+  it.each(["lost response", "unverified", "wrong target"])(
+    "fences %s durably, logs uncertainty and never resends",
+    async (failure) => {
+      const f = fixture();
+      const read = f.client.call.bind(f.client);
+      f.client.call = async (name, args) => {
+        const result = await read(name, args);
+        if (name !== "send_message") return result;
+        if (failure === "lost response") throw new Error("secret-token");
+        return packed({
+          sent: true,
+          verified: failure !== "unverified",
+          threadId: failure === "unverified" ? "primary" : "wrong",
+          environmentId: "env-1",
+          deliveryMode: "after-current",
+        });
+      };
+      await expect(f.adapter.deliverToThread("primary", "hello", opts)).rejects.toThrow(
+        /Uncertain T3 delivery/,
+      );
+      await f.adapter.close();
+      const restarted = new T3ThreadAdapter(f.config, f.client, f.logger);
+      adapters.push(restarted);
+      await expect(restarted.deliverToThread("primary", "hello", opts)).rejects.toBeInstanceOf(
+        PermanentError,
+      );
+      expect(f.calls.filter((c) => c.name === "send_message")).toHaveLength(1);
+      expect(f.error).toHaveBeenCalledWith(
+        expect.objectContaining({
+          deliveryId: "delivery-one",
+          threadId: "primary",
+          status: "uncertain",
+        }),
+        expect.any(String),
+      );
+      expect(JSON.stringify(f.error.mock.calls)).not.toContain("secret-token");
+    },
+  );
+  it("returns the persisted fallback target after restart and primary recovery", async () => {
     const f = fixture();
-    f.primaryThread.session.status = "error";
-    const dispatch = f.client.dispatch;
-    f.client.dispatch = vi.fn(async (command) => {
-      await dispatch(command);
-      throw new Error("lost response");
-    });
-    await expect(f.adapter.deliverToThread(primary, "hello", opts)).rejects.toBeInstanceOf(
-      UnreachableError,
-    );
+    f.primaryState.attention = "error";
+    await f.adapter.deliverToThread("primary", "hello", opts);
     await f.adapter.close();
-    f.primaryThread.session.status = "idle";
     const restarted = new T3ThreadAdapter(f.config, f.client, f.logger);
     adapters.push(restarted);
-    await expect(restarted.deliverToThread(primary, "hello", opts)).resolves.toEqual({
-      threadId: fallback,
+    f.primaryState.attention = "idle";
+    await expect(restarted.deliverToThread("primary", "hello", opts)).resolves.toEqual({
+      threadId: "fallback",
     });
-    expect(f.client.dispatch).toHaveBeenCalledTimes(1);
-  });
-  it("retries the same durable command if dispatch failed before acceptance", async () => {
-    const f = fixture();
-    const dispatch = f.client.dispatch;
-    f.client.dispatch = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("connection lost"))
-      .mockImplementation(dispatch);
-    await expect(f.adapter.deliverToThread(primary, "hello", opts)).rejects.toBeInstanceOf(
-      UnreachableError,
-    );
-    await f.adapter.deliverToThread(primary, "hello", opts);
-    const calls = vi.mocked(f.client.dispatch).mock.calls;
-    expect(calls[0]?.[0]).toEqual(calls[1]?.[0]);
-    expect(f.accepted.size).toBe(1);
-  });
-  it("finds the marker on an older page before retrying", async () => {
-    const f = fixture();
-    const dispatch = f.client.dispatch;
-    f.client.dispatch = vi.fn(async (command) => {
-      await dispatch(command);
-      throw new Error("lost response");
-    });
-    await expect(f.adapter.deliverToThread(primary, "hello", opts)).rejects.toBeInstanceOf(
-      UnreachableError,
-    );
-    const thread = f.primaryThread;
-    vi.mocked(f.client.thread).mockImplementation(async (_id, page) =>
-      page?.beforeCursor
-        ? { thread, page: { hasMore: false } }
-        : { thread: { ...thread, messages: [] }, page: { hasMore: true, beforeCursor: "older" } },
-    );
-    await f.adapter.deliverToThread(primary, "hello", opts);
-    expect(f.client.dispatch).toHaveBeenCalledTimes(1);
-  });
-  it("rejects changed content and unregistered routes", async () => {
-    const f = fixture();
-    await f.adapter.deliverToThread(primary, "hello", opts);
-    await expect(f.adapter.deliverToThread(primary, "changed", opts)).rejects.toBeInstanceOf(
+    expect(f.calls.filter((c) => c.name === "send_message")).toHaveLength(1);
+    await expect(restarted.deliverToThread("primary", "changed", opts)).rejects.toBeInstanceOf(
       PermanentError,
     );
-    await expect(f.adapter.deliverToThread(fallback, "hello", opts)).rejects.toBeInstanceOf(
-      PermanentError,
-    );
-    await expect(
-      f.adapter.deliverToThread(primary, "hello", { ...opts, sandbox: "read-only" }),
-    ).rejects.toBeInstanceOf(PermanentError);
   });
-  it("waits for projection and retries an accepted but still unprojected command without duplication", async () => {
-    vi.useFakeTimers();
-    const f = fixture();
-    const dispatch = f.client.dispatch;
-    f.client.dispatch = vi.fn(async (command) => {
-      await dispatch(command);
-      return { sequence: 1 };
-    });
-    const read = f.client.thread;
-    let visible = false;
-    f.client.thread = vi.fn(async (id, options) => {
-      const snapshot = (await read(id, options)) as {
-        thread: { messages: unknown[] };
-        page: { hasMore: boolean };
-      };
-      return visible ? snapshot : { ...snapshot, thread: { ...snapshot.thread, messages: [] } };
-    });
-    const pending = expect(
-      f.adapter.deliverToThread(primary, "hello", opts),
-    ).rejects.toBeInstanceOf(UnreachableError);
-    await vi.runAllTimersAsync();
-    await pending;
-    const retry = f.adapter.deliverToThread(primary, "hello", opts);
-    // Let the duplicate command be replayed while projection is still lagging.
-    await vi.advanceTimersByTimeAsync(250);
-    visible = true;
-    await vi.runAllTimersAsync();
-    await expect(retry).resolves.toEqual({ threadId: primary });
-    expect(f.accepted.size).toBe(1);
-    expect(f.client.dispatch).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(f.client.dispatch).mock.calls[0]).toEqual(
-      vi.mocked(f.client.dispatch).mock.calls[1],
-    );
-  });
-  it("concurrent owners use a single durable command", async () => {
+  it("claims only one receipt across concurrent owners", async () => {
     const f = fixture();
     const second = new T3ThreadAdapter(f.config, f.client, f.logger);
     adapters.push(second);
-    await Promise.all([
-      f.adapter.deliverToThread(primary, "hello", opts),
-      second.deliverToThread(primary, "hello", opts),
+    await Promise.allSettled([
+      f.adapter.deliverToThread("primary", "hello", opts),
+      second.deliverToThread("primary", "hello", opts),
     ]);
-    expect(f.accepted.size).toBe(1);
-    expect(f.primaryThread.messages).toHaveLength(1);
+    expect(f.calls.filter((c) => c.name === "send_message")).toHaveLength(1);
   });
-  it("does not confuse an assistant-quoted marker with a projected user message", async () => {
+  it("reports failed status through the API and continues later queue items after uncertainty", async () => {
     const f = fixture();
-    f.primaryThread.messages.push({
-      id: "assistant",
-      role: "assistant",
-      text: '[wakewire-delivery:"delivery-one"]\n\nhello',
-    });
-    await f.adapter.deliverToThread(primary, "hello", opts);
-    expect(f.client.dispatch).toHaveBeenCalledTimes(1);
-  });
-  it("rejects mismatched read identity and malformed pagination", async () => {
-    const f = fixture();
-    const thread = f.primaryThread;
-    vi.mocked(f.client.thread).mockResolvedValue({ thread: { ...thread, id: fallback } });
-    await expect(f.adapter.deliverToThread(primary, "hello", opts)).rejects.toBeInstanceOf(
-      PermanentError,
-    );
-    vi.mocked(f.client.thread).mockResolvedValue({ thread, page: { hasMore: true } });
-    await expect(f.adapter.deliverToThread(primary, "hello", opts)).rejects.toBeInstanceOf(
-      UnreachableError,
-    );
-    expect(f.client.dispatch).not.toHaveBeenCalled();
-  });
-  it("rejects invalid registration, duplicate targets, extra keys and relative paths", () => {
-    const f = fixture();
-    expect(T3RegistrationSchema.safeParse(f.config).success).toBe(true);
-    for (const invalid of [
-      { threadIds: [] },
-      { threadIds: [primary, primary] },
-      { threadIds: ["unknown"] },
-      { bridgePath: "relative.js" },
-      { stateFile: "relative.db" },
-      { inheritPermissions: false },
-      { token: "forbidden" },
-    ]) {
-      expect(T3RegistrationSchema.safeParse({ ...f.config, ...invalid }).success).toBe(false);
+    const read = f.client.call.bind(f.client);
+    let writes = 0;
+    f.client.call = async (name, args) => {
+      const result = await read(name, args);
+      if (name === "send_message" && ++writes === 1) throw new Error("lost response");
+      return result;
+    };
+    const db = openDatabase(":memory:");
+    const stores = createStores(db);
+    try {
+      const route = stores.routes.create({
+        name: "test",
+        source: "github",
+        match: { repo: "example/repo", events: ["push"] },
+        target: { type: "thread", threadId: "primary" },
+        sandbox: "workspace-write",
+        enabled: true,
+      });
+      const queue = new DeliveryQueue(stores, f.adapter, f.logger, { autoWake: false });
+      for (const deliveryId of ["one", "two"])
+        queue.enqueueEvent(route, {
+          source: "github",
+          kind: "push",
+          deliveryId,
+          occurredAt: new Date().toISOString(),
+          summary: deliveryId,
+          payload: { repo: "example/repo" },
+        });
+      await queue.tick();
+      await queue.tick();
+      expect(stores.deliveries.list({ status: "failed" })).toHaveLength(1);
+      expect(stores.deliveries.list({ status: "delivered" })).toHaveLength(1);
+      expect(queue.queueDepth()).toBe(0);
+      const app = createApi({ stores, config: { apiToken: "test" } } as unknown as ApiContext);
+      const response = await app.request("/api/deliveries?status=failed", {
+        headers: { authorization: "Bearer test" },
+      });
+      expect(await response.json()).toMatchObject({
+        deliveries: [{ status: "failed", error: expect.stringContaining("Uncertain T3 delivery") }],
+      });
+    } finally {
+      db.close();
     }
+  });
+  it("rejects invalid, duplicate or overbroad registration", () => {
+    const f = fixture();
+    for (const extra of [
+      { cwd: "relative" },
+      { stateFile: "relative" },
+      { inheritPermissions: false },
+      { fallbackTargets: [f.primary] },
+      { token: "forbidden" },
+    ])
+      expect(T3ConfigSchema.safeParse({ ...f.config, ...extra }).success).toBe(false);
   });
 });

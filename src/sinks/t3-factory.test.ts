@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -34,11 +35,19 @@ function registration(coordination?: object) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "wakewire-t3-factory-"));
   dirs.push(dir);
   const file = path.join(dir, "registration.json");
+  const serverPath = path.join(dir, "server.js");
+  writeFileSync(serverPath, "// synthetic bridge, never executed");
   writeFileSync(
     file,
     JSON.stringify({
-      threadIds: ["11111111-1111-4111-8111-111111111111"],
-      bridgePath: path.join(dir, "bridge.js"),
+      threadId: "primary",
+      environmentId: "env",
+      projectId: "project",
+      cwd: dir,
+      serverPath,
+      serverSha256: createHash("sha256")
+        .update("// synthetic bridge, never executed")
+        .digest("hex"),
       stateFile: path.join(dir, "receipts.db"),
       inheritPermissions: true,
       ...(coordination ? { coordination } : {}),
