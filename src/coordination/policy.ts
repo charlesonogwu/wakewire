@@ -1,4 +1,5 @@
 import { parseReview } from "./review.js";
+import { evaluateRigorous, type Stage } from "./rigorous.js";
 export type Agent = "codex" | "hermes";
 export interface ReviewComment {
   authorId: string;
@@ -7,6 +8,7 @@ export interface ReviewComment {
   updatedAt: string;
 }
 export interface CoordinationSnapshot {
+  number?: number;
   repository: string;
   state: "open" | "closed";
   headSha: string | null;
@@ -25,13 +27,23 @@ export interface CoordinationConfig {
   prepushEnabled?: boolean;
 }
 export interface CoordinationResult {
-  action: "ignore" | "wait" | "fix" | "review" | "verify" | "ready" | "blocked";
+  action: "ignore" | "wait" | "fix" | "review" | "verify" | "ready" | "blocked" | Stage;
+  stage?: string;
+  stageKey?: string;
   reason: string;
   headSha: string | null;
   owner: Agent | null;
 }
 const agents = ["codex", "hermes"] as const;
-const impacts = new Set(["website", "pi", "supabase", "elevenlabs", "cloudflare", "apps-script"]);
+const impacts = new Set([
+  "website",
+  "pi",
+  "supabase",
+  "elevenlabs",
+  "telnyx",
+  "cloudflare",
+  "apps-script",
+]);
 const validSha = (value: string | null): value is string =>
   typeof value === "string" && /^[0-9a-f]{40}$/.test(value);
 const isAgent = (value: string | undefined): value is Agent =>
@@ -105,6 +117,25 @@ export function evaluateCoordination(
   owner = handoff.owner;
   const peer = handoff.reviewer;
   const ownerLabels = agents.map((agent) => `agent:${agent}`);
+  const rigorous = evaluateRigorous(
+    snapshot,
+    config,
+    owner,
+    peer,
+    handoff.impacts.split(",").map((s) => s.trim()),
+  );
+  if (rigorous) {
+    if (
+      snapshot.labels.filter((label) => ownerLabels.includes(label)).length !== 1 ||
+      !snapshot.labels.includes(`agent:${owner}`)
+    )
+      return result("blocked", "Rigorous ownership label mismatch");
+    return {
+      ...result(rigorous.action, rigorous.reason),
+      stage: rigorous.stage,
+      stageKey: rigorous.stageKey,
+    };
+  }
   const approvalLabels = agents.map((agent) => `approved:${agent}`);
   const workflows = agents.flatMap((agent) => [`review:${agent}`, `changes-requested:${agent}`]);
   if (

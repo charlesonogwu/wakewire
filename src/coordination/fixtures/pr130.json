@@ -1,0 +1,14 @@
+[
+    {
+        "id":  6052968684,
+        "authorId":  "217436545",
+        "updatedAt":  "2026-10-08T05:24:20Z",
+        "body":  "@codex continue collaboration\n\nContinue PR #130 at stage evidence:owner for exact head `5be55f39486b5527672fe795e9e91f6264b607f0`. Re-fetch GitHub evidence before acting. This wake is coordination only and never release authority.\n\n\u003c!-- agent-routing:v2\nevent-key: charlesonogwu/lash-luxe-nyc:130:5be55f39486b5527672fe795e9e91f6264b607f0:evidence:owner:none\nactor: codex\nstage: evidence:owner\nhead-sha: 5be55f39486b5527672fe795e9e91f6264b607f0\n--\u003e"
+    },
+    {
+        "id":  6053004224,
+        "authorId":  "217436545",
+        "updatedAt":  "2026-10-08T05:27:11Z",
+        "body":  "\u003c!-- agent-owner-evidence:v1\npr: 130\nhead-sha: b607e0741fa409d1f65477268c36d47265cd1732\nowner: codex\nevidence-id: owner-130-b607e0741fa4\nimpacts-json: [\"website\"]\nsummary: Refresh merged main 8141ccf; diff remains cancellation copy/API/tests only. Complimentary cancellations say no deposit charged; paid deposit wording and 24-hour block preserved. npm test 801/801; build, verify:push 12/12, targeted API/test ESLint, diff check passed. Synthetic tests only, no real cancellations or customer actions. Fresh mobile preview blocked by T3 navigation/resize failure; prior PR viewport QA is not fresh device verification. Website/API deploy only after Charles merges; rollback by revert. Request independent challenge including mobile QA gap.\n--\u003e"
+    }
+]

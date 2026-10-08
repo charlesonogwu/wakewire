@@ -898,3 +898,22 @@ describe("private registration opt-in", () => {
     ).toThrow();
   });
 });
+
+it("delivers rigorous prompts and drops old-head stage webhooks", async () => {
+  const f = fixture();
+  f.state.labels = ["agent:codex"];
+  const routing = `<!-- agent-routing:v2\nevent-key: example/project:7:${sha}:evidence:owner:none\nactor: codex\nstage: evidence:owner\nhead-sha: ${sha}\n-->`;
+  f.state.comments = [{ ...vote("codex"), body: routing }];
+  await f.adapter.deliverToThread("test-thread", "ignored", opts());
+  expect(f.sent[0]?.prompt).toContain("evidence:owner");
+  expect(f.sent[0]?.prompt).toContain("agent-owner-evidence:v1");
+  const old = {
+    ...opts("stale"),
+    event: {
+      ...event("stale"),
+      payload: { ...event().payload, commentBody: routing.replaceAll(sha, "b".repeat(40)) },
+    },
+  };
+  await f.adapter.deliverToThread("test-thread", "ignored", old);
+  expect(f.sent).toHaveLength(1);
+});
