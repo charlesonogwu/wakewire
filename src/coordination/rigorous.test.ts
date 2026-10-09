@@ -223,3 +223,43 @@ it("notifies readiness only after current trusted verification and only with a c
     ).action,
   ).toBe("blocked");
 });
+
+it("fixed responses wait without a block; a new-head route wakes the owner", () => {
+  if (!evidence) throw new Error("Missing evidence fixture");
+  const findingChallenge = {
+    ...challenge,
+    body: challenge.body.replace(
+      "findings-json: []",
+      'findings-json: [{"id":"F1","severity":"important","component":"state","evidence":"stalled","request":"correct"}]',
+    ),
+  };
+  const fixed = {
+    ...response,
+    body: response.body.replace(
+      "responses-json: []",
+      'responses-json: [{"id":"F1","disposition":"fixed","evidence":"new head prepared"}]',
+    ),
+  };
+  const before = evaluateCoordination(snapshot([evidence, findingChallenge, fixed]), config);
+  expect(before.action).toBe("wait");
+  expect(before.stage).toBe("awaiting-new-head");
+  const newSha = "f".repeat(40);
+  const currentRoute = {
+    id: 6053004390,
+    authorId: "217436545",
+    updatedAt: "2026-10-08T07:00:00Z",
+    body: `<!-- agent-routing:v2\nevent-key: ${config.expectedRepository}:130:${newSha}:evidence:owner:none\nactor: codex\nstage: evidence:owner\nhead-sha: ${newSha}\n-->`,
+  };
+  const after = evaluateCoordination(
+    { ...snapshot([evidence, findingChallenge, fixed, currentRoute]), headSha: newSha },
+    config,
+  );
+  expect(after.action).toBe("evidence:owner");
+});
+it("a trusted manual block applies only to its exact current head", () => {
+  const block = record("agent-manual-block:v1", "actor: orchestrator", 9);
+  expect(evaluateCoordination(snapshot([block]), config).action).toBe("blocked");
+  expect(
+    evaluateCoordination({ ...snapshot([block]), headSha: "f".repeat(40) }, config).action,
+  ).toBe("wait");
+});
