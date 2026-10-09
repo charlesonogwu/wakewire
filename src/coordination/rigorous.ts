@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { Agent, CoordinationConfig, CoordinationSnapshot, ReviewComment } from "./policy.js";
 
 export const stages = [
+  "refresh:owner",
   "evidence:owner",
   "challenge:peer",
   "response:owner",
@@ -47,6 +48,27 @@ const base = {
   "head-sha": sha,
 };
 const schemas = {
+  "agent-coordination-failure:v1": z
+    .object({
+      worker: z.enum(["review", "operational"]),
+      "head-sha": sha,
+      "config-fingerprint": z.string().regex(/^[a-f0-9]{64}$/),
+      category: z.enum([
+        "invalid-config",
+        "unknown-model",
+        "credentials",
+        "unsupported-reasoning",
+        "rate-limit",
+        "provider-overload",
+        "connection",
+        "timeout",
+        "all-models-unavailable",
+        "agent-blocked",
+        "unknown",
+      ]),
+      attempts: z.coerce.number().int().positive(),
+    })
+    .strict(),
   "agent-manual-block:v1": z
     .object({ ...base, actor: z.enum(["charles", "orchestrator"]), summary: text })
     .strict(),
@@ -175,8 +197,12 @@ export function evaluateRigorous(
           ? fields.reviewer
           : owner;
     if (actor !== "codex" && actor !== "hermes") return blocked("Invalid rigorous actor");
-    // Routing records are controller-authored; accept the configured owner or peer controller.
-    if (marker !== "agent-routing:v2" && !config.trustedAuthorIds[actor].includes(comment.authorId))
+    // Routing and failure records are controller-authored; accept either trusted controller.
+    if (
+      marker !== "agent-routing:v2" &&
+      marker !== "agent-coordination-failure:v1" &&
+      !config.trustedAuthorIds[actor].includes(comment.authorId)
+    )
       continue;
     if (
       !Number.isSafeInteger(comment.id) ||
@@ -186,7 +212,11 @@ export function evaluateRigorous(
     )
       return blocked("Invalid rigorous record ordering");
     seen.add(comment.id);
-    if (marker !== "agent-routing:v2" && fields.pr !== snapshot.number)
+    if (
+      marker !== "agent-routing:v2" &&
+      marker !== "agent-coordination-failure:v1" &&
+      fields.pr !== snapshot.number
+    )
       return blocked("Rigorous record PR mismatch");
     entries.push({ marker, fields, comment });
   }
@@ -200,6 +230,12 @@ export function evaluateRigorous(
   );
   if (entries.some((e) => e.marker === "agent-manual-block:v1"))
     return blocked("Manual block for current head");
+  if (
+    entries.some(
+      (e) => e.marker === "agent-coordination-failure:v1" && e.fields.category === "agent-blocked",
+    )
+  )
+    return blocked("Agent blocked current head");
   const records = entries.filter((e) => e.marker !== "agent-routing:v2");
   let cursor = -1;
   const next = (marker: Marker, challenge?: unknown) => {

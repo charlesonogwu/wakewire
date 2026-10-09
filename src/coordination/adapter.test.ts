@@ -75,6 +75,7 @@ function fixture(coordination: CoordinationConfig = config) {
   };
   const state = {
     head: sha,
+    mergeable: true,
     branch: "hermes/example",
     body: "<!-- agent-handoff:v1\norigin: codex\nowner: codex\nreviewer: hermes\nimpacts: website\n-->",
     labels: ["agent:codex", "waiting:charles"],
@@ -126,6 +127,7 @@ function fixture(coordination: CoordinationConfig = config) {
       return {
         number,
         state: state.status,
+        mergeable: state.mergeable,
         body: state.body,
         labels: state.labels.map((name) => ({ name })),
         head: { sha: state.head, ref: state.branch, repo: { full_name: "example/project" } },
@@ -977,4 +979,23 @@ it("validates the optional orchestrator UUID in registration", () => {
     expect(
       CoordinationConfigSchema.safeParse({ ...config, orchestratorThreadId: value }).success,
     ).toBe(false);
+});
+
+it("delivers an owner refresh prompt and ignores stale route edits", async () => {
+  const f = fixture();
+  f.state.labels = ["agent:codex"];
+  f.state.mergeable = false;
+  const routing = `<!-- agent-routing:v2\nevent-key: example/project:7:${sha}:refresh:owner:none\nactor: codex\nstage: refresh:owner\nhead-sha: ${sha}\n-->`;
+  f.state.comments = [{ ...vote("codex"), body: routing }];
+  await f.adapter.deliverToThread("test-thread", "ignored", opts());
+  expect(f.sent[0]?.prompt).toContain("Action: refresh:owner");
+  expect(f.sent[0]?.prompt).toContain("update only the designated owner branch");
+  await f.adapter.deliverToThread("test-thread", "ignored", {
+    ...opts("old-route"),
+    event: {
+      ...event("old-route"),
+      payload: { ...event().payload, commentBody: routing.replaceAll(sha, "b".repeat(40)) },
+    },
+  });
+  expect(f.sent).toHaveLength(1);
 });

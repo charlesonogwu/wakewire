@@ -295,3 +295,15 @@ describe("fresh GitHub snapshot", () => {
     expect(pages).toBeLessThanOrEqual(100);
   });
 });
+
+it("includes mergeability and rejects a mergeability-only snapshot race", async () => {
+  const f = fixture();
+  f.data["pulls/7"] = { ...f.pr, mergeable: false };
+  expect(await f.client.read(7)).toHaveProperty("mergeable", false);
+  let reads = 0;
+  const client = new GithubSnapshotClient("example/project", async (url) => {
+    const raw = await f.transport(url);
+    return url.endsWith("pulls/7") ? { ...f.pr, mergeable: ++reads !== 1 } : raw;
+  });
+  await expect(client.read(7)).rejects.toThrow(/changed/);
+});
