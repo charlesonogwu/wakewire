@@ -47,6 +47,9 @@ const base = {
   "head-sha": sha,
 };
 const schemas = {
+  "agent-manual-block:v1": z
+    .object({ ...base, actor: z.enum(["charles", "orchestrator"]), summary: text })
+    .strict(),
   "agent-owner-evidence:v1": z
     .object({ ...base, owner: agent, "evidence-id": id, "impacts-json": impacts, summary: text })
     .strict(),
@@ -195,6 +198,8 @@ export function evaluateRigorous(
       Date.parse(a.comment.updatedAt) - Date.parse(b.comment.updatedAt) ||
       a.comment.id - b.comment.id,
   );
+  if (entries.some((e) => e.marker === "agent-manual-block:v1"))
+    return blocked("Manual block for current head");
   const records = entries.filter((e) => e.marker !== "agent-routing:v2");
   let cursor = -1;
   const next = (marker: Marker, challenge?: unknown) => {
@@ -265,8 +270,10 @@ export function evaluateRigorous(
     latest = answer;
     if (findingIds.some((id) => !answers.some((a) => a.id === id)))
       return stage("response:owner", owner);
-    if (answers.some((a) => a.disposition === "fixed" || a.disposition === "blocked"))
-      return blocked("Response requires new head or resolution");
+    if (answers.some((a) => a.disposition === "blocked"))
+      return blocked("Response requires resolution");
+    if (answers.some((a) => a.disposition === "fixed"))
+      return done("wait", "awaiting-new-head", "Owner correction awaits a new head");
     const verdict = next("agent-review:v2", challengeId);
     if (!verdict) return stage("verdict:peer", peer);
     if (verdict.fields.reviewer !== peer) return blocked("Verdict reviewer mismatch");
