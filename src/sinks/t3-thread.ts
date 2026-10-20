@@ -3,7 +3,8 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { z } from "zod";
 import type { Logger } from "../logging.js";
-import { T3BridgeUnavailableError } from "./t3-mcp.js";
+import { T3ExpiryMonitor } from "./t3-expiry.js";
+import { T3NotSubmittedError } from "./t3-mcp.js";
 import {
   type AgentAdapter,
   BusyError,
@@ -35,6 +36,10 @@ export const T3ConfigSchema = T3TargetSchema.extend({
 export type T3Config = z.infer<typeof T3ConfigSchema>;
 export type T3Target = z.infer<typeof T3TargetSchema>;
 export interface T3ToolClient {
+  /** "bridge" (default): pinned third-party bridge. "official": T3 Code's own /mcp tools. */
+  readonly dialect?: "bridge" | "official";
+  /** Official transport only: expiry of the stored access token (never the token). */
+  tokenExpiresAt?(): string | null;
   call(name: string, args: Record<string, unknown>): Promise<unknown>;
   close(): void | Promise<void>;
 }
@@ -51,11 +56,45 @@ const Projects = z.object({
   ),
 });
 const Threads = z.object({ threads: z.array(z.object(identity)) });
+// T3 Code's own MCP shapes (t3_thread_read / t3_project_list / t3_thread_list).
+const OfficialRead = z.object({
+  thread: z.object({
+    threadId: z.string(),
+    projectId: z.string(),
+    status: z.string(),
+    archived: z.boolean(),
+    settled: z.boolean(),
+    pendingRequestCount: z.number().int().nonnegative(),
+    itemCount: z.number().int().nonnegative().optional(),
+  }),
+  items: z.array(z.object({ type: z.string(), text: z.string().nullable().optional() })),
+  nextPosition: z.number().int().nullable().optional(),
+  hasMore: z.boolean().optional(),
+});
+const OfficialProjects = z.object({
+  projects: z.array(z.object({ id: z.string(), workspaceRoot: z.string() })),
+  nextCursor: z.number().int().nullable().optional(),
+});
+const OfficialThreads = z.object({ threads: z.array(z.object({ threadId: z.string() })) });
+/** Idle and finished threads take a new turn; running ones queue it behind the current turn. */
+const OFFICIAL_READY = ["idle", "running", "completed", "interrupted", "cancelled"];
+type Readiness = "human" | "failed" | "ready" | "unverified";
+interface Verified {
+  readiness: Readiness;
+  itemCount?: number | undefined;
+}
 const Receipt = z.object({
   hash: z.string(),
   state: z.enum(["sending", "sent"]),
   target_thread_id: z.string().nullable(),
 });
+/** Deterministic per delivery: T3 deduplicates sends by clientRequestId, so retries never double-send. */
+export function t3ClientRequestId(deliveryId: string, hash: string): string {
+  const digest = createHash("sha256")
+    .update(JSON.stringify([deliveryId, hash]))
+    .digest("hex");
+  return `wakewire-${digest.slice(0, 48)}`;
+}
 function unpack(raw: unknown): unknown {
   const result = z
     .object({
@@ -87,6 +126,9 @@ export class T3ThreadAdapter implements AgentAdapter {
   readonly supportsNewThreads = false;
   private readonly db: Database.Database;
   private readonly config: T3Config;
+  private readonly official: boolean;
+  private readonly expiry: T3ExpiryMonitor | null = null;
+  private readonly expiryTimer: NodeJS.Timeout | null = null;
   constructor(
     config: z.input<typeof T3ConfigSchema>,
     private readonly client: T3ToolClient,
@@ -106,29 +148,58 @@ export class T3ThreadAdapter implements AgentAdapter {
       if (!columns.some((column) => column.name === "target_thread_id"))
         this.db.exec("ALTER TABLE t3_receipts ADD COLUMN target_thread_id TEXT");
     })();
+    this.official = client.dialect === "official";
+    if (client.tokenExpiresAt) {
+      this.expiry = new T3ExpiryMonitor(this.db, {
+        expiresAt: () => client.tokenExpiresAt?.() ?? null,
+        logger,
+        notify: (message, clientRequestId) => this.notify(message, clientRequestId),
+      });
+      this.expiryTimer = setInterval(() => void this.expiry?.check(), 60 * 60 * 1000);
+      this.expiryTimer.unref();
+    }
   }
-  private async verify(target: T3Target) {
-    let thread: z.infer<typeof Thread>,
-      projects: z.infer<typeof Projects>,
-      threads: z.infer<typeof Threads>;
+  /** Daily expiry warning plus a single notice per expiry (official transport only). */
+  checkExpiry(): Promise<void> {
+    return this.expiry?.check() ?? Promise.resolve();
+  }
+  /** Operator notice to the routing fallback (orchestrator), else the primary. */
+  private async notify(message: string, clientRequestId: string) {
+    const target = this.config.fallbackTargets[0] ?? this.config;
+    await this.verify(target);
+    unpack(
+      await this.client.call("send_message", {
+        threadId: target.threadId,
+        message,
+        mode: "queue",
+        clientRequestId,
+      }),
+    );
+  }
+  private async verify(target: T3Target): Promise<Verified> {
     try {
-      thread = Thread.parse(
-        unpack(
-          await this.client.call("get_thread", {
-            threadId: target.threadId,
-            turnLimit: 1,
-            includeActivities: false,
-          }),
-        ),
-      );
-      projects = Projects.parse(unpack(await this.client.call("list_projects", {})));
-      threads = Threads.parse(
-        unpack(await this.client.call("list_threads", { projectId: target.projectId, limit: 100 })),
-      );
+      return this.official ? await this.verifyOfficial(target) : await this.verifyBridge(target);
     } catch (error) {
-      if (error instanceof PermanentError) throw error;
+      // Mismatches stay permanent; proven-unsent failures (bridge pin, T3 access)
+      // keep their distinct class so the operator sees the real cause.
+      if (error instanceof PermanentError || error instanceof T3NotSubmittedError) throw error;
       throw new UnreachableError("Cannot verify T3 thread/project");
     }
+  }
+  private async verifyBridge(target: T3Target): Promise<Verified> {
+    const thread = Thread.parse(
+      unpack(
+        await this.client.call("get_thread", {
+          threadId: target.threadId,
+          turnLimit: 1,
+          includeActivities: false,
+        }),
+      ),
+    );
+    const projects = Projects.parse(unpack(await this.client.call("list_projects", {})));
+    const threads = Threads.parse(
+      unpack(await this.client.call("list_threads", { projectId: target.projectId, limit: 100 })),
+    );
     const project = projects.projects.filter(
       (p) => p.projectId === target.projectId && p.environmentId === target.environmentId,
     );
@@ -143,9 +214,78 @@ export class T3ThreadAdapter implements AgentAdapter {
     ) {
       throw new PermanentError("T3 thread, environment or workspace mismatch");
     }
-    return thread;
+    if (["needs-approval", "needs-input", "plan-ready"].includes(thread.attention))
+      return { readiness: "human" };
+    if (
+      thread.session.status === "error" ||
+      thread.attention === "error" ||
+      thread.latestTurn?.state === "error"
+    )
+      return { readiness: "failed" };
+    if (
+      ["working", "done", "idle"].includes(thread.attention) &&
+      ["running", "ready", "stopped"].includes(thread.session.status)
+    )
+      return { readiness: "ready" };
+    return { readiness: "unverified" };
+  }
+  /** The official /mcp serves one T3 environment (its origin), so identity is
+   * thread + project + canonical workspace; environmentId applies to the bridge only. */
+  private async verifyOfficial(target: T3Target): Promise<Verified> {
+    const { thread } = OfficialRead.parse(
+      unpack(
+        await this.client.call("get_thread", {
+          threadId: target.threadId,
+          view: "messages",
+          limit: 1,
+          maxCharsPerItem: 1,
+        }),
+      ),
+    );
+    const projects: z.infer<typeof OfficialProjects>["projects"] = [];
+    let cursor: number | undefined;
+    for (let page = 0; page < 20; page++) {
+      const result = OfficialProjects.parse(
+        unpack(
+          await this.client.call("list_projects", {
+            limit: 100,
+            ...(cursor === undefined ? {} : { cursor }),
+          }),
+        ),
+      );
+      projects.push(...result.projects);
+      if (result.nextCursor == null || result.nextCursor === cursor) break;
+      cursor = result.nextCursor;
+    }
+    // Settled threads leave T3's active list, so ask for the list the thread is in.
+    const threads = OfficialThreads.parse(
+      unpack(
+        await this.client.call("list_threads", {
+          projectId: target.projectId,
+          limit: 100,
+          settled: thread.settled,
+        }),
+      ),
+    );
+    const project = projects.filter((p) => p.id === target.projectId);
+    if (
+      thread.threadId !== target.threadId ||
+      thread.projectId !== target.projectId ||
+      thread.archived ||
+      project.length !== 1 ||
+      cwd(project[0]?.workspaceRoot ?? "") !== cwd(target.cwd) ||
+      threads.threads.filter((t) => t.threadId === target.threadId).length !== 1
+    ) {
+      throw new PermanentError("T3 thread, project or workspace mismatch");
+    }
+    let readiness: Readiness = "unverified";
+    if (thread.pendingRequestCount > 0 || thread.status === "waiting") readiness = "human";
+    else if (thread.status === "failed") readiness = "failed";
+    else if (OFFICIAL_READY.includes(thread.status)) readiness = "ready";
+    return { readiness, itemCount: thread.itemCount };
   }
   async deliverToThread(threadId: string, prompt: string, opts: DeliveryOptions) {
+    void this.checkExpiry();
     if (
       threadId !== this.config.threadId ||
       opts.sandbox !== "workspace-write" ||
@@ -170,26 +310,18 @@ export class T3ThreadAdapter implements AgentAdapter {
     }
     let selected: T3Target | undefined;
     for (const target of [this.config, ...this.config.fallbackTargets]) {
-      const thread = await this.verify(target);
+      const { readiness } = await this.verify(target);
       // Human requests take precedence over provider failure: do not bypass an
       // approval or input request by sending the same work to a fallback.
-      if (["needs-approval", "needs-input", "plan-ready"].includes(thread.attention))
-        throw new BusyError("T3 is busy with a human request");
-      if (
-        thread.session.status === "error" ||
-        thread.attention === "error" ||
-        thread.latestTurn?.state === "error"
-      ) {
+      if (readiness === "human") throw new BusyError("T3 is busy with a human request");
+      if (readiness === "failed") {
         this.logger.warn(
           { threadId: target.threadId },
           "T3 target failed; checking next registered fallback",
         );
         continue;
       }
-      if (
-        !["working", "done", "idle"].includes(thread.attention) ||
-        !["running", "ready", "stopped"].includes(thread.session.status)
-      )
+      if (readiness !== "ready")
         throw new BusyError("T3 is busy with a human request or its state is unverified");
       selected = target;
       break;
@@ -201,22 +333,10 @@ export class T3ThreadAdapter implements AgentAdapter {
       )
       .run(opts.deliveryId, hash, selected.threadId);
     if (claimed.changes !== 1) throw new BusyError("Another owner holds delivery receipt");
+    const message = `[wakewire-delivery:${JSON.stringify(opts.deliveryId)}]\n\n${prompt}`;
     try {
-      z.object({
-        sent: z.literal(true),
-        verified: z.literal(true),
-        threadId: z.literal(selected.threadId),
-        environmentId: z.literal(selected.environmentId),
-        deliveryMode: z.literal("after-current"),
-      }).parse(
-        unpack(
-          await this.client.call("send_message", {
-            threadId: selected.threadId,
-            message: `[wakewire-delivery:${JSON.stringify(opts.deliveryId)}]\n\n${prompt}`,
-            deliveryMode: "after-current",
-          }),
-        ),
-      );
+      if (this.official) await this.sendOfficial(selected, message, opts.deliveryId, hash);
+      else await this.sendBridge(selected, message);
       this.db
         .prepare("UPDATE t3_receipts SET state='sent' WHERE id=? AND hash=? AND state='sending'")
         .run(opts.deliveryId, hash);
@@ -230,10 +350,10 @@ export class T3ThreadAdapter implements AgentAdapter {
       );
       return { threadId: selected.threadId };
     } catch (error) {
-      if (error instanceof T3BridgeUnavailableError) {
-        // The pinned client proves it rejected the call BEFORE opening a
-        // transport. Release only our own unsent claim; ambiguous calls never
-        // take this path and retain their durable fence.
+      if (error instanceof T3NotSubmittedError) {
+        // The client proves the call never reached T3 (bridge pin rejected before
+        // a transport opened, or T3 refused the access token). Release only our
+        // own unsent claim; ambiguous calls never take this path and keep their fence.
         this.db
           .prepare("DELETE FROM t3_receipts WHERE id=? AND hash=? AND state='sending'")
           .run(opts.deliveryId, hash);
@@ -244,6 +364,38 @@ export class T3ThreadAdapter implements AgentAdapter {
       throw this.uncertain(opts.deliveryId, selected.threadId);
     }
   }
+  private async sendBridge(target: T3Target, message: string) {
+    z.object({
+      sent: z.literal(true),
+      verified: z.literal(true),
+      threadId: z.literal(target.threadId),
+      environmentId: z.literal(target.environmentId),
+      deliveryMode: z.literal("after-current"),
+    }).parse(
+      unpack(
+        await this.client.call("send_message", {
+          threadId: target.threadId,
+          message,
+          deliveryMode: "after-current",
+        }),
+      ),
+    );
+  }
+  /** Queue mode is T3's equivalent of the bridge's after-current delivery. */
+  private async sendOfficial(target: T3Target, message: string, deliveryId: string, hash: string) {
+    const result = z.record(z.string(), z.unknown()).parse(
+      unpack(
+        await this.client.call("send_message", {
+          threadId: target.threadId,
+          message,
+          mode: "queue",
+          clientRequestId: t3ClientRequestId(deliveryId, hash),
+        }),
+      ),
+    );
+    if (typeof result.threadId === "string" && result.threadId !== target.threadId)
+      throw new Error("T3 acknowledged a different thread");
+  }
   /** Reconciliation only reads the recorded target. An absent marker NEVER
    * authorizes another send or a fallback, including a crash before submission. */
   private async reconcile(deliveryId: string, hash: string, threadId: string): Promise<boolean> {
@@ -252,57 +404,87 @@ export class T3ThreadAdapter implements AgentAdapter {
     );
     if (!target) return false;
     try {
-      await this.verify(target);
+      const verified = await this.verify(target);
       const marker = `[wakewire-delivery:${JSON.stringify(deliveryId)}]`;
-      const seen = new Set<string>();
-      let beforeCursor: string | undefined;
-      for (let page = 0; page < 20; page++) {
-        const result = z
-          .object({
-            threadId: z.literal(threadId),
-            environmentId: z.literal(target.environmentId),
-            messages: z.array(z.object({ role: z.string(), text: z.string() })),
-            page: z
-              .object({
-                hasMore: z.boolean().optional(),
-                beforeCursor: z.string().nullable().optional(),
-              })
-              .nullable()
-              .optional(),
-          })
-          .parse(
-            unpack(
-              await this.client.call("get_thread", {
-                threadId,
-                turnLimit: 50,
-                includeActivities: false,
-                ...(beforeCursor ? { beforeCursor } : {}),
-              }),
-            ),
-          );
-        if (
-          result.messages.some(
-            (message) => message.role === "user" && message.text.includes(marker),
-          )
-        ) {
-          this.db
-            .prepare(
-              "UPDATE t3_receipts SET state='sent' WHERE id=? AND hash=? AND state='sending'",
-            )
-            .run(deliveryId, hash);
-          this.logger.info(
-            { deliveryId, threadId, status: "sent" },
-            "T3 delivery reconciled from projected user marker; no resend",
-          );
-          return true;
-        }
-        const next = result.page?.beforeCursor;
-        if (!result.page?.hasMore || !next || seen.has(next)) return false;
-        seen.add(next);
-        beforeCursor = next;
-      }
+      const found = this.official
+        ? await this.findMarkerOfficial(target, marker, verified.itemCount)
+        : await this.findMarkerBridge(target, marker);
+      if (!found) return false;
+      this.db
+        .prepare("UPDATE t3_receipts SET state='sent' WHERE id=? AND hash=? AND state='sending'")
+        .run(deliveryId, hash);
+      this.logger.info(
+        { deliveryId, threadId, status: "sent" },
+        "T3 delivery reconciled from projected user marker; no resend",
+      );
+      return true;
     } catch {
       /* A read failure is not evidence of delivery or permission to resend. */
+    }
+    return false;
+  }
+  private async findMarkerBridge(target: T3Target, marker: string): Promise<boolean> {
+    const seen = new Set<string>();
+    let beforeCursor: string | undefined;
+    for (let page = 0; page < 20; page++) {
+      const result = z
+        .object({
+          threadId: z.literal(target.threadId),
+          environmentId: z.literal(target.environmentId),
+          messages: z.array(z.object({ role: z.string(), text: z.string() })),
+          page: z
+            .object({
+              hasMore: z.boolean().optional(),
+              beforeCursor: z.string().nullable().optional(),
+            })
+            .nullable()
+            .optional(),
+        })
+        .parse(
+          unpack(
+            await this.client.call("get_thread", {
+              threadId: target.threadId,
+              turnLimit: 50,
+              includeActivities: false,
+              ...(beforeCursor ? { beforeCursor } : {}),
+            }),
+          ),
+        );
+      if (result.messages.some((m) => m.role === "user" && m.text.includes(marker))) return true;
+      const next = result.page?.beforeCursor;
+      if (!result.page?.hasMore || !next || seen.has(next)) return false;
+      seen.add(next);
+      beforeCursor = next;
+    }
+    return false;
+  }
+  /** T3 item positions are global and read forward, so scan the most recent 1000 items. */
+  private async findMarkerOfficial(
+    target: T3Target,
+    marker: string,
+    itemCount: number | undefined,
+  ): Promise<boolean> {
+    let after = itemCount !== undefined && itemCount > 1000 ? itemCount - 1001 : undefined;
+    const seen = new Set<number>();
+    for (let page = 0; page < 20; page++) {
+      const result = OfficialRead.parse(
+        unpack(
+          await this.client.call("get_thread", {
+            threadId: target.threadId,
+            view: "messages",
+            limit: 50,
+            maxCharsPerItem: 500,
+            ...(after === undefined ? {} : { afterPosition: after }),
+          }),
+        ),
+      );
+      if (result.thread.threadId !== target.threadId) return false;
+      if (result.items.some((item) => item.type === "user_message" && item.text?.includes(marker)))
+        return true;
+      const next = result.nextPosition;
+      if (!result.hasMore || next == null || seen.has(next)) return false;
+      seen.add(next);
+      after = next;
     }
     return false;
   }
@@ -321,6 +503,7 @@ export class T3ThreadAdapter implements AgentAdapter {
     throw new PermanentError("T3 supports only registered existing threads");
   }
   async probe() {
+    void this.checkExpiry();
     try {
       await this.verify(this.config);
       return true;
@@ -329,6 +512,7 @@ export class T3ThreadAdapter implements AgentAdapter {
     }
   }
   async close() {
+    if (this.expiryTimer) clearInterval(this.expiryTimer);
     try {
       await this.client.close();
     } finally {

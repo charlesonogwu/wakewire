@@ -9,6 +9,7 @@ import { authSlack } from "./cli/auth-slack.js";
 import { authWebhook } from "./cli/auth-webhook.js";
 import { configGet, configList, configSet } from "./cli/config-cmd.js";
 import { installService, uninstallService } from "./cli/service.js";
+import { t3Login, t3Status } from "./cli/t3-login.js";
 import {
   apiFetch,
   inspectDaemonState,
@@ -244,6 +245,31 @@ program
   .action(async (registration: string) => {
     const changed = await refreshDesktopRegistration(registration);
     console.log(changed ? "Desktop registration refreshed" : "Desktop registration is current");
+  });
+
+interface T3AccessFlags {
+  registration?: string;
+  tokenFile?: string;
+  origin?: string;
+}
+const t3 = program.command("t3").description("Manage T3 Code access for the t3-thread sink");
+t3.command("login")
+  .description(
+    "Approve WakeWire in T3 Code (operate access, 30 days) and store the token privately",
+  )
+  .option("--registration <file>", "T3 registration (default: $WAKEWIRE_T3_REGISTRATION)")
+  .option("--token-file <file>", "Where to store the token (default: next to the registration)")
+  .option("--origin <url>", "T3 server origin (default: ~/.t3/userdata/server-runtime.json)")
+  .action(async (opts: T3AccessFlags) => {
+    await t3Login(opts);
+  });
+t3.command("status")
+  .description("Show when T3 access expires (never prints the token)")
+  .option("--registration <file>", "T3 registration (default: $WAKEWIRE_T3_REGISTRATION)")
+  .option("--token-file <file>", "Token file (default: next to the registration)")
+  .option("--origin <url>", "T3 server origin")
+  .action((opts: T3AccessFlags) => {
+    if (!t3Status(opts)) process.exitCode = 1;
   });
 
 program

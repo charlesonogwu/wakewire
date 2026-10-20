@@ -7,8 +7,11 @@ import type { Logger } from "../logging.js";
 import type { T3Config, T3ToolClient } from "./t3-thread.js";
 import { PermanentError, UnreachableError } from "./types.js";
 
+/** Proven not submitted (rejected before any tool call reached T3): hold and retry. */
+export class T3NotSubmittedError extends UnreachableError {}
+
 /** Raised only before an MCP transport is opened: no request was submitted. */
-export class T3BridgeUnavailableError extends UnreachableError {}
+export class T3BridgeUnavailableError extends T3NotSubmittedError {}
 
 /** Port of the deployed MR T client: pinned bridge, inherited private user auth. */
 export class T3McpClient implements T3ToolClient {

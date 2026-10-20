@@ -155,7 +155,8 @@ WakeWire talks to Codex through an adapter (config: settings key `sink.adapter`)
   maximum-compatibility last resort.
 - **`t3-thread`** — deliver to explicitly registered T3 Code threads, with ordered
   session fallbacks, queued delivery, and durable retry reconciliation.
-  See [T3 registration and recovery](docs/t3-thread.md).
+  See [T3 registration and recovery](docs/t3-thread.md); `wakewire t3 login` switches it
+  to T3 Code's own MCP endpoint ([how](docs/t3-thread.md#t3-codes-own-mcp-endpoint)).
 - **`muse-exec`** — headless `muse exec` shell-out against your installed Muse
   Code CLI: `wakewire config set sink.adapter muse-exec` (then restart the
   daemon). WakeWire thread ids map 1:1 onto Muse session ids; prompts go via
