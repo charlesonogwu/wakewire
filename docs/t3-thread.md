@@ -65,15 +65,19 @@ the pinned bridge remains the default and existing registrations parse unchanged
 ```json
 {
   "transport": "t3-official-mcp",
-  "tokenFile": "C:/private/wakewire/t3-mcp-token.json",
-  "origin": "http://127.0.0.1:3773"
+  "tokenFile": "C:/private/wakewire/t3-mcp-token.json"
 }
 ```
 
-These keys are added to the registration above. `tokenFile` must be absolute. `origin`
-is optional; it is read from `~/.t3/userdata/server-runtime.json`, then defaults to
-`http://127.0.0.1:3773`. Only loopback http origins are accepted. `serverPath` and
-`serverSha256` may stay in the file (ignored) so switching back is one line.
+These keys are added to the registration above. `tokenFile` must be absolute. An
+optional `"origin"` pins the T3 server. Without it, the origin is read from
+`~/.t3/userdata/server-runtime.json` (default `http://127.0.0.1:3773`), and it is
+re-read once per call after a connection failure. Only loopback http origins are
+accepted. The stored token is bound to the origin and `/mcp` resource it was approved
+for. If T3 moves to another origin, the daemon logs
+``T3 origin changed: re-run `wakewire t3 login` `` and holds deliveries until a new
+login. `serverPath` and `serverSha256` may stay in the file (ignored) so switching
+back is one line.
 
 To switch the daemon over:
 
@@ -90,13 +94,19 @@ To switch the daemon over:
 
 **Re-approval is needed every 30 days.** T3 issues no refresh token. `wakewire t3 status`
 shows the expiry date and days left, never the token. With fewer than 5 days left,
-the daemon logs a warning once a day. While the token is still valid, it also sends ONE
+the daemon logs a warning once a day. While the token is still valid, it also sends a
 short notice to the first fallback target (the orchestrator), or the primary if there is
-none, once per expiry. The token file is re-read on every call, so a fresh
+none. The notice is **at-most-once per expiry**. It is claimed in the receipt database
+before sending. A failed send is retried with the same `clientRequestId`, which T3
+deduplicates. A crash mid-send leaves the claim in place, and that notice is never
+retried, so it can be missed; the daily log warning still appears. The token file is re-read on every call, so a fresh
 `wakewire t3 login` takes effect without a restart.
 
-With this transport, a missing, expired or rejected token (HTTP 401/403) logs
-``re-approve T3 access: run `wakewire t3 login` `` and **holds** deliveries; it never drops them.
+With this transport, a missing, unreadable, malformed, expired or rejected token
+(HTTP 401/403) logs ``re-approve T3 access: run `wakewire t3 login` `` and **holds**
+deliveries; it never drops them. The log names the reason (for example the OS error
+code or the malformed fields), never the file content. It repeats at most once per
+10 minutes per reason.
 A request that T3 refused for auth reasons, or that never connected, provably was not
 submitted. Only that unsent claim is released for retry.
 
@@ -105,10 +115,17 @@ Mapping onto T3's tools (exact names, or a uniquely prefixed variant found via
 
 | Adapter call | T3 tool | Notes |
 | --- | --- | --- |
-| `get_thread` | `t3_thread_read` | `view: "messages"`; `thread.projectId`, `status`, `pendingRequestCount`, `archived`, `settled` |
+| `get_thread` | `t3_thread_read` | `view: "messages"`; `thread.threadId`, `projectId`, `status`, `pendingRequestCount`, `archived` |
 | `list_projects` | `t3_project_list` | paginated by `nextCursor`; project `id` + `workspaceRoot` |
-| `list_threads` | `t3_thread_list` | project-filtered, `settled` matching the thread |
 | `send_message` | `t3_thread_send` | `mode: "queue"` only (the old `after-current`), plus `clientRequestId` |
+
+`t3_thread_list` is not used: `t3_thread_read` is authoritative for thread identity.
+The project listing only supplies the workspace path. If the project is absent from a
+listing that ended early (20 pages), the delivery is held, not failed. A send succeeds
+only on an exact acknowledgement: `threadId` equal to the target, a string
+`messageId`, and `delivery` of `started`, `queued` or `steered`. Any other response
+takes the uncertain path. The fence is kept, the sink reconciles read-only, and it
+never resends.
 
 `clientRequestId` is derived from the delivery ID and content hash. T3 deduplicates
 sends by it, so a retry of the same delivery never double-sends. The receipt fence and
@@ -116,7 +133,7 @@ marker reconciliation still apply. Reconciliation scans the most recent 1000 thr
 items for the user message carrying the delivery marker.
 
 The official endpoint serves one T3 environment, so identity is thread +
-project + canonical workspace path; `environmentId` is still required in the
+project + canonical workspace path + not archived; `environmentId` is still required in the
 registration but is only compared by the bridge. Readiness: a pending human request
 or `waiting` status holds (BusyError); `failed` advances to the next fallback;
 `idle`, `running`, `completed`, `interrupted` and `cancelled` accept a queued message;

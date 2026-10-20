@@ -70,7 +70,9 @@ async function fakeOAuth(): Promise<FakeOAuth> {
         access_token: TOKEN,
         token_type: "Bearer",
         expires_in: 30 * 24 * 60 * 60,
-        scope: state.scope || "orchestration:read orchestration:operate",
+        ...(state.scope === "omit"
+          ? {}
+          : { scope: state.scope || "orchestration:read orchestration:operate" }),
       });
     }
     // The "approval" step records the challenge for the code it issues.
@@ -217,6 +219,25 @@ describe("wakewire t3 login", () => {
       t3Login({ registration, print: () => {}, onAuthorizeUrl: approve(oauth) }),
     ).rejects.toThrow(/read-only/);
     expect(existsSync(tokenFile)).toBe(false);
+  });
+
+  it("fails closed when the token response omits scope", async () => {
+    const oauth = await fakeOAuth();
+    oauth.scope = "omit";
+    const { registration, tokenFile } = registrationDir(oauth.origin);
+    await expect(
+      t3Login({ registration, print: () => {}, onAuthorizeUrl: approve(oauth) }),
+    ).rejects.toThrow(/omitted scope/);
+    expect(existsSync(tokenFile)).toBe(false);
+  });
+
+  it("status reports a malformed token file without its content", () => {
+    const { registration, tokenFile } = registrationDir("http://127.0.0.1:3773");
+    writeFileSync(tokenFile, `{"accessToken": "${TOKEN}"`);
+    const lines: string[] = [];
+    expect(t3Status({ registration, print: (line) => lines.push(line) })).toBe(false);
+    expect(lines.join("\n")).toContain("malformed (invalid JSON)");
+    expect(lines.join("\n")).not.toContain(TOKEN);
   });
 
   it("refuses non-loopback origins", async () => {

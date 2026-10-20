@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
@@ -13,7 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { T3NotSubmittedError } from "./t3-mcp.js";
 import { OfficialT3McpClient, T3AuthRequiredError } from "./t3-official-mcp.js";
 import type { T3Config } from "./t3-thread.js";
-import { writeT3Token } from "./t3-token.js";
+import { loadT3Token, writeT3Token } from "./t3-token.js";
 import { PermanentError, UnreachableError } from "./types.js";
 
 const TOKEN = "synthetic-secret-token-value-123";
@@ -74,15 +74,23 @@ async function fakeT3(prefix = ""): Promise<FakeT3> {
   return state;
 }
 
-function setup(origin: string, expiresInMs = 10 * 24 * 60 * 60 * 1000) {
+interface SetupExtra {
+  tokenOrigin?: string;
+  /** Omit to discover the origin from runtimeFile instead of pinning it. */
+  pinned?: boolean;
+  runtimeFile?: string;
+  now?: () => number;
+}
+function setup(origin: string, expiresInMs = 10 * 24 * 60 * 60 * 1000, extra: SetupExtra = {}) {
+  const tokenOrigin = extra.tokenOrigin ?? origin;
   const dir = mkdtempSync(path.join(os.tmpdir(), "wakewire-t3-official-"));
   dirs.push(dir);
   const tokenFile = path.join(dir, "token.json");
   if (expiresInMs !== 0)
     writeT3Token(tokenFile, {
       version: 1,
-      origin,
-      resource: `${origin}/mcp`,
+      origin: tokenOrigin,
+      resource: `${tokenOrigin}/mcp`,
       clientId: "client",
       scope: "orchestration:read orchestration:operate",
       accessToken: TOKEN,
@@ -108,9 +116,18 @@ function setup(origin: string, expiresInMs = 10 * 24 * 60 * 60 * 1000) {
       },
     }),
   );
-  const client = new OfficialT3McpClient(config, { origin, tokenFile }, logger);
+  const client = new OfficialT3McpClient(
+    config,
+    {
+      ...(extra.pinned === false ? {} : { origin }),
+      tokenFile,
+      runtimeFile: extra.runtimeFile,
+      ...(extra.now ? { now: extra.now } : {}),
+    },
+    logger,
+  );
   clients.push(client);
-  return { client, lines, tokenFile };
+  return { client, lines, tokenFile, dir };
 }
 
 describe("OfficialT3McpClient", () => {
@@ -120,7 +137,7 @@ describe("OfficialT3McpClient", () => {
     const send = { threadId: "primary", message: "m", mode: "queue", clientRequestId: "id" };
     for (const [name, args] of [
       ["get_thread", { threadId: "stranger" }],
-      ["list_threads", { projectId: "stranger" }],
+      ["list_threads", { projectId: "project" }],
       ["send_message", { ...send, threadId: "stranger" }],
       ["send_message", { ...send, mode: "steer" }],
       ["send_message", { ...send, mode: "auto" }],
@@ -140,7 +157,6 @@ describe("OfficialT3McpClient", () => {
     const { client } = setup(t3.origin);
     await client.call("get_thread", { threadId: "fallback", view: "messages", limit: 1 });
     await client.call("list_projects", { limit: 100 });
-    await client.call("list_threads", { projectId: "p2", limit: 100, settled: false });
     const result = await client.call("send_message", {
       threadId: "primary",
       message: "hello",
@@ -151,7 +167,6 @@ describe("OfficialT3McpClient", () => {
     expect(t3.calls).toEqual([
       { name: "t3_thread_read", args: { threadId: "fallback", view: "messages", limit: 1 } },
       { name: "t3_project_list", args: { limit: 100 } },
-      { name: "t3_thread_list", args: { projectId: "p2", limit: 100, settled: false } },
       {
         name: "t3_thread_send",
         args: {
@@ -221,6 +236,81 @@ describe("OfficialT3McpClient", () => {
     const { client, lines } = setup(t3.origin);
     expect(client.tokenExpiresAt()).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     await client.call("list_projects", {});
+    expect(lines.join("")).not.toContain(TOKEN);
+  });
+
+  it("refuses a token issued for another origin with an origin-changed log", async () => {
+    const t3 = await fakeT3();
+    const { client, lines } = setup(t3.origin, undefined, { tokenOrigin: "http://127.0.0.1:1" });
+    await expect(client.call("list_projects", {})).rejects.toBeInstanceOf(T3AuthRequiredError);
+    expect(t3.requests).toBe(0);
+    expect(lines.join("")).toContain("origin changed: re-run `wakewire t3 login`");
+    expect(lines.join("")).not.toContain(TOKEN);
+  });
+
+  it("re-discovers the origin once after a connection failure", async () => {
+    const live = await fakeT3();
+    const dead = await fakeT3();
+    const deadServer = servers.pop();
+    deadServer?.closeAllConnections();
+    await new Promise((resolve) => deadServer?.close(resolve));
+    const runtimeDir = mkdtempSync(path.join(os.tmpdir(), "wakewire-t3-runtime-"));
+    dirs.push(runtimeDir);
+    const runtimeFile = path.join(runtimeDir, "server-runtime.json");
+    writeFileSync(runtimeFile, JSON.stringify({ origin: dead.origin }));
+    // Approved against the old origin; T3 is still there, so the call is just unreachable.
+    const { client, lines } = setup(dead.origin, undefined, { pinned: false, runtimeFile });
+    await expect(client.call("list_projects", {})).rejects.toBeInstanceOf(T3NotSubmittedError);
+    await expect(client.call("list_projects", {})).rejects.not.toBeInstanceOf(T3AuthRequiredError);
+    // T3 restarts on another port: the next call re-discovers it and asks for a new login.
+    writeFileSync(runtimeFile, JSON.stringify({ origin: live.origin }));
+    await expect(client.call("list_projects", {})).rejects.toBeInstanceOf(T3AuthRequiredError);
+    expect(client.currentOrigin()).toBe(live.origin);
+    expect(lines.join("")).toContain("origin changed: re-run `wakewire t3 login`");
+    expect(live.requests).toBe(0);
+  });
+
+  it("never re-discovers a pinned origin", async () => {
+    const t3 = await fakeT3();
+    const runtimeDir = mkdtempSync(path.join(os.tmpdir(), "wakewire-t3-runtime-"));
+    dirs.push(runtimeDir);
+    const runtimeFile = path.join(runtimeDir, "server-runtime.json");
+    writeFileSync(runtimeFile, JSON.stringify({ origin: t3.origin }));
+    const pinned = setup("http://127.0.0.1:9", undefined, { runtimeFile });
+    await expect(pinned.client.call("list_projects", {})).rejects.toBeInstanceOf(
+      T3NotSubmittedError,
+    );
+    expect(pinned.client.currentOrigin()).toBe("http://127.0.0.1:9");
+    expect(t3.requests).toBe(0);
+  });
+
+  it("logs re-approve at most once per 10 minutes", async () => {
+    const t3 = await fakeT3();
+    let now = Date.now();
+    const { client, lines } = setup(t3.origin, -1000, { now: () => now });
+    for (let i = 0; i < 3; i++)
+      await expect(client.call("list_projects", {})).rejects.toBeInstanceOf(T3AuthRequiredError);
+    const count = () => lines.filter((line) => line.includes("re-approve T3 access")).length;
+    expect(count()).toBe(1);
+    now += 9 * 60 * 1000;
+    await client.call("list_projects", {}).catch(() => {});
+    expect(count()).toBe(1);
+    now += 60 * 1000;
+    await client.call("list_projects", {}).catch(() => {});
+    expect(count()).toBe(2);
+  });
+
+  it("names malformed and unreadable token files without logging their content", async () => {
+    const t3 = await fakeT3();
+    const { client, lines, tokenFile, dir } = setup(t3.origin, 0);
+    writeFileSync(tokenFile, `{"accessToken": "${TOKEN}"`);
+    await expect(client.call("list_projects", {})).rejects.toBeInstanceOf(T3AuthRequiredError);
+    expect(lines.join("")).toContain("malformed (invalid JSON)");
+    writeFileSync(tokenFile, JSON.stringify({ version: 1, accessToken: TOKEN }));
+    expect(loadT3Token(tokenFile)).toMatchObject({ status: "malformed" });
+    expect(JSON.stringify(loadT3Token(tokenFile))).not.toContain(TOKEN);
+    expect(loadT3Token(dir)).toMatchObject({ status: "unreadable" });
+    expect(loadT3Token(path.join(dir, "absent.json"))).toEqual({ status: "missing" });
     expect(lines.join("")).not.toContain(TOKEN);
   });
 

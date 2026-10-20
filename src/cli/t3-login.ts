@@ -7,8 +7,9 @@ import { z } from "zod";
 import {
   daysLeft,
   defaultTokenFile,
+  describeT3TokenLoad,
   discoverT3Origin,
-  readT3Token,
+  loadT3Token,
   T3_SCOPES,
   tokenIsUsable,
   writeT3Token,
@@ -222,7 +223,9 @@ export async function t3Login(opts: T3LoginOptions = {}): Promise<T3LoginResult>
     );
     if (token.token_type.toLowerCase() !== "bearer")
       throw new Error("T3 issued an unsupported token type");
-    const granted = token.scope ?? scope;
+    // Fail closed: an omitted scope is not proof that Operate access was granted.
+    if (!token.scope) throw new Error("T3 token response omitted scope; refusing it");
+    const granted = token.scope;
     if (!granted.split(" ").includes("orchestration:operate"))
       throw new Error("T3 granted read-only access; approve Operate access instead");
     const obtained = now();
@@ -251,14 +254,21 @@ export function t3Status(opts: T3LoginOptions = {}): boolean {
   const print = opts.print ?? ((line: string) => console.log(line));
   const now = (opts.now ?? Date.now)();
   const { tokenFile, origin } = resolveT3Access(opts);
-  const token = readT3Token(tokenFile);
+  const load = loadT3Token(tokenFile);
   print(`T3 origin: ${origin}`);
   print(`Token file: ${tokenFile}`);
-  if (!token) {
-    print("T3 access: not approved. Run `wakewire t3 login`.");
+  if (load.status !== "ok") {
+    print(
+      load.status === "missing"
+        ? "T3 access: not approved. Run `wakewire t3 login`."
+        : `T3 access: ${describeT3TokenLoad(load)}. Run \`wakewire t3 login\`.`,
+    );
     return false;
   }
-  const usable = tokenIsUsable(token, now);
+  const { token } = load;
+  if (new URL(token.origin).origin !== origin)
+    print(`T3 origin changed (token is for ${token.origin}). Re-run \`wakewire t3 login\`.`);
+  const usable = tokenIsUsable(token, now) && new URL(token.origin).origin === origin;
   print(`Scope: ${token.scope}`);
   print(`Expires: ${token.expiresAt} (${Math.max(0, daysLeft(token.expiresAt, now))} days left)`);
   if (!usable) print("T3 access has expired. Run `wakewire t3 login` to re-approve.");

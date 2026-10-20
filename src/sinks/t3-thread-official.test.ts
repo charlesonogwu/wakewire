@@ -49,6 +49,15 @@ function fixture(options: { expiresAt?: string | null; dir?: string } = {}) {
   const calls: { name: string; args: Record<string, unknown> }[] = [];
   let sendFailure: Error | null = null;
   let readFailure: Error | null = null;
+  let ack: (args: Record<string, unknown>) => unknown = (args) => ({
+    threadId: args.threadId,
+    messageId: `message:mcp:${String(args.clientRequestId)}`,
+    delivery: "queued",
+  });
+  let projectPage: (cursor: unknown) => unknown = () => ({
+    projects: [{ id: "project-1", workspaceRoot: dir }],
+    nextCursor: null,
+  });
   const client: T3ToolClient = {
     dialect: "official",
     ...(options.expiresAt !== undefined ? { tokenExpiresAt: () => options.expiresAt ?? null } : {}),
@@ -62,18 +71,11 @@ function fixture(options: { expiresAt?: string | null; dir?: string } = {}) {
           nextPosition: null,
           hasMore: false,
         });
-      if (name === "list_projects")
-        return packed({ projects: [{ id: "project-1", workspaceRoot: dir }], nextCursor: null });
-      if (name === "list_threads")
-        return packed({
-          threads: [...threads.values()]
-            .filter((t) => t.settled === args.settled)
-            .map((t) => ({ threadId: t.threadId })),
-        });
+      if (name === "list_projects") return packed(projectPage(args.cursor));
       if (name === "send_message") {
         if (sendFailure) throw sendFailure;
         items.push({ type: "user_message", text: String(args.message) });
-        return packed({ threadId: args.threadId, accepted: true });
+        return packed(ack(args));
       }
       throw new Error("Unexpected tool");
     },
@@ -106,6 +108,12 @@ function fixture(options: { expiresAt?: string | null; dir?: string } = {}) {
     failReads: (error: Error | null) => {
       readFailure = error;
     },
+    setAck: (next: typeof ack) => {
+      ack = next;
+    },
+    setProjects: (next: typeof projectPage) => {
+      projectPage = next;
+    },
   };
 }
 const hashOf = (prompt: string) =>
@@ -114,24 +122,19 @@ const hashOf = (prompt: string) =>
     .digest("hex");
 
 describe("T3ThreadAdapter over T3 Code's MCP", () => {
-  it("verifies via thread read, project list and thread list, then queues the send", async () => {
+  it("verifies via thread read and project list, then queues the send", async () => {
     const t3 = fixture();
     await expect(t3.adapter.deliverToThread("primary", "wake", opts)).resolves.toEqual({
       threadId: "primary",
     });
-    expect(t3.calls.map((c) => c.name)).toEqual([
-      "get_thread",
-      "list_projects",
-      "list_threads",
-      "send_message",
-    ]);
+    expect(t3.calls.map((c) => c.name)).toEqual(["get_thread", "list_projects", "send_message"]);
     expect(t3.calls[0]?.args).toEqual({
       threadId: "primary",
       view: "messages",
       limit: 1,
       maxCharsPerItem: 1,
     });
-    expect(t3.calls[2]?.args).toEqual({ projectId: "project-1", limit: 100, settled: false });
+    expect(t3.calls[1]?.args).toEqual({ limit: 100 });
     expect(t3.sends()[0]?.args).toEqual({
       threadId: "primary",
       message: `[wakewire-delivery:"delivery-one"]\n\nwake`,
@@ -151,12 +154,74 @@ describe("T3ThreadAdapter over T3 Code's MCP", () => {
     expect(a).toMatch(/^wakewire-[a-f0-9]{48}$/);
   });
 
-  it("looks a settled thread up in T3's settled list", async () => {
+  it("verifies a settled thread from t3_thread_read alone", async () => {
     const t3 = fixture();
     const primary = t3.threads.get("primary");
     if (primary) primary.settled = true;
-    await t3.adapter.deliverToThread("primary", "wake", opts);
-    expect(t3.calls[2]?.args).toMatchObject({ settled: true });
+    await expect(t3.adapter.deliverToThread("primary", "wake", opts)).resolves.toEqual({
+      threadId: "primary",
+    });
+  });
+
+  it("paginates projects and holds when the listing is incomplete", async () => {
+    const t3 = fixture();
+    t3.setProjects((cursor) =>
+      cursor === 1
+        ? { projects: [{ id: "project-1", workspaceRoot: t3.dir }], nextCursor: null }
+        : { projects: [{ id: "other", workspaceRoot: t3.dir }], nextCursor: 1 },
+    );
+    await expect(t3.adapter.deliverToThread("primary", "wake", opts)).resolves.toEqual({
+      threadId: "primary",
+    });
+    const truncated = fixture();
+    let page = 0;
+    truncated.setProjects(() => ({
+      projects: [{ id: `other-${page}`, workspaceRoot: truncated.dir }],
+      nextCursor: ++page,
+    }));
+    const error = await truncated.adapter
+      .deliverToThread("primary", "wake", opts)
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(UnreachableError);
+    expect(error).not.toBeInstanceOf(PermanentError);
+    expect(truncated.sends()).toHaveLength(0);
+  });
+
+  it("treats a send acknowledgement that is not exact as uncertain and never resends", async () => {
+    for (const bad of [
+      (args: Record<string, unknown>) => ({ threadId: args.threadId, accepted: true }),
+      (args: Record<string, unknown>) => ({
+        threadId: args.threadId,
+        messageId: "m",
+        delivery: "dropped",
+      }),
+      () => ({ threadId: "orchestrator", messageId: "m", delivery: "queued" }),
+    ]) {
+      const t3 = fixture();
+      // Drop the projected message so reconciliation cannot prove delivery.
+      t3.setAck((args) => {
+        t3.items.length = 0;
+        return bad(args);
+      });
+      await expect(t3.adapter.deliverToThread("primary", "wake", opts)).rejects.toThrow(
+        /Uncertain T3 delivery/,
+      );
+      t3.setAck((args) => ({ threadId: args.threadId, messageId: "m", delivery: "queued" }));
+      await expect(t3.adapter.deliverToThread("primary", "wake", opts)).rejects.toThrow(
+        /Uncertain/,
+      );
+      expect(t3.sends()).toHaveLength(1);
+    }
+  });
+
+  it("accepts started, queued and steered acknowledgements", async () => {
+    for (const delivery of ["started", "queued", "steered"]) {
+      const t3 = fixture();
+      t3.setAck((args) => ({ threadId: args.threadId, messageId: "m", delivery }));
+      await expect(t3.adapter.deliverToThread("primary", "wake", opts)).resolves.toEqual({
+        threadId: "primary",
+      });
+    }
   });
 
   it("rejects project, workspace and archived mismatches permanently", async () => {

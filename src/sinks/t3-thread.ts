@@ -75,7 +75,12 @@ const OfficialProjects = z.object({
   projects: z.array(z.object({ id: z.string(), workspaceRoot: z.string() })),
   nextCursor: z.number().int().nullable().optional(),
 });
-const OfficialThreads = z.object({ threads: z.array(z.object({ threadId: z.string() })) });
+/** t3_thread_send acknowledgement: the exact thread, a message ID and how T3 accepted it. */
+const OfficialSendAck = z.object({
+  threadId: z.string(),
+  messageId: z.string().min(1),
+  delivery: z.enum(["started", "queued", "steered"]),
+});
 /** Idle and finished threads take a new turn; running ones queue it behind the current turn. */
 const OFFICIAL_READY = ["idle", "running", "completed", "interrupted", "cancelled"];
 type Readiness = "human" | "failed" | "ready" | "unverified";
@@ -244,6 +249,7 @@ export class T3ThreadAdapter implements AgentAdapter {
     );
     const projects: z.infer<typeof OfficialProjects>["projects"] = [];
     let cursor: number | undefined;
+    let complete = false;
     for (let page = 0; page < 20; page++) {
       const result = OfficialProjects.parse(
         unpack(
@@ -254,27 +260,24 @@ export class T3ThreadAdapter implements AgentAdapter {
         ),
       );
       projects.push(...result.projects);
-      if (result.nextCursor == null || result.nextCursor === cursor) break;
+      if (result.nextCursor == null) {
+        complete = true;
+        break;
+      }
+      if (result.nextCursor === cursor) break;
       cursor = result.nextCursor;
     }
-    // Settled threads leave T3's active list, so ask for the list the thread is in.
-    const threads = OfficialThreads.parse(
-      unpack(
-        await this.client.call("list_threads", {
-          projectId: target.projectId,
-          limit: 100,
-          settled: thread.settled,
-        }),
-      ),
-    );
     const project = projects.filter((p) => p.id === target.projectId);
+    // Only a complete listing proves the project is absent; a truncated one holds.
+    if (project.length === 0 && !complete)
+      throw new UnreachableError("T3 project listing incomplete; cannot verify workspace");
+    // t3_thread_read is authoritative for thread identity, so no list-membership check.
     if (
       thread.threadId !== target.threadId ||
       thread.projectId !== target.projectId ||
       thread.archived ||
       project.length !== 1 ||
-      cwd(project[0]?.workspaceRoot ?? "") !== cwd(target.cwd) ||
-      threads.threads.filter((t) => t.threadId === target.threadId).length !== 1
+      cwd(project[0]?.workspaceRoot ?? "") !== cwd(target.cwd)
     ) {
       throw new PermanentError("T3 thread, project or workspace mismatch");
     }
@@ -383,7 +386,9 @@ export class T3ThreadAdapter implements AgentAdapter {
   }
   /** Queue mode is T3's equivalent of the bridge's after-current delivery. */
   private async sendOfficial(target: T3Target, message: string, deliveryId: string, hash: string) {
-    const result = z.record(z.string(), z.unknown()).parse(
+    // Any shape other than an exact acknowledgement is ambiguous: the caller keeps
+    // the fence and takes the read-only reconciliation / uncertain path.
+    OfficialSendAck.extend({ threadId: z.literal(target.threadId) }).parse(
       unpack(
         await this.client.call("send_message", {
           threadId: target.threadId,
@@ -393,8 +398,6 @@ export class T3ThreadAdapter implements AgentAdapter {
         }),
       ),
     );
-    if (typeof result.threadId === "string" && result.threadId !== target.threadId)
-      throw new Error("T3 acknowledged a different thread");
   }
   /** Reconciliation only reads the recorded target. An absent marker NEVER
    * authorizes another send or a fallback, including a crash before submission. */

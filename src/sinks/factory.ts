@@ -15,7 +15,6 @@ import { MuseExecAdapter } from "./muse-exec.js";
 import { T3McpClient } from "./t3-mcp.js";
 import { OfficialT3McpClient } from "./t3-official-mcp.js";
 import { type T3Config, T3ConfigSchema, T3ThreadAdapter } from "./t3-thread.js";
-import { discoverT3Origin } from "./t3-token.js";
 import type { AgentAdapter } from "./types.js";
 
 const T3RegistrationBase = T3ConfigSchema.safeExtend({
@@ -61,15 +60,19 @@ function createT3Adapter(registration: T3Registration, logger: Logger): T3Thread
     inheritPermissions: registration.inheritPermissions,
   });
   if (registration.transport === "t3-official-mcp") {
-    const origin = discoverT3Origin(registration.origin);
-    logger.info(
-      { adapter: "t3-thread", transport: "t3-official-mcp", origin },
-      "T3 sink uses T3 Code's MCP endpoint",
-    );
     const client = new OfficialT3McpClient(
       targetConfig,
-      { origin, tokenFile: registration.tokenFile },
+      { origin: registration.origin, tokenFile: registration.tokenFile },
       logger,
+    );
+    logger.info(
+      {
+        adapter: "t3-thread",
+        transport: "t3-official-mcp",
+        origin: client.currentOrigin(),
+        pinned: Boolean(registration.origin),
+      },
+      "T3 sink uses T3 Code's MCP endpoint",
     );
     return new T3ThreadAdapter(targetConfig, client, logger);
   }

@@ -45,14 +45,49 @@ export function discoverT3Origin(explicit?: string, runtimeFile?: string): strin
   }
 }
 
-/** Returns null when the file is missing or malformed; never throws token content. */
-export function readT3Token(file: string): T3Token | null {
+export type T3TokenLoad =
+  | { status: "ok"; token: T3Token }
+  | { status: "missing" }
+  /** The file exists but cannot be read; `code` is the OS error code (e.g. EACCES). */
+  | { status: "unreadable"; code: string }
+  /** `problem` names the failing fields or "invalid JSON"; it never contains file content. */
+  | { status: "malformed"; problem: string };
+
+/** Distinguishes "no file" from unreadable or malformed files without exposing content. */
+export function loadT3Token(file: string): T3TokenLoad {
+  let text: string;
   try {
-    const parsed = T3TokenSchema.safeParse(JSON.parse(readFileSync(file, "utf8")));
-    return parsed.success ? parsed.data : null;
-  } catch {
-    return null;
+    text = readFileSync(file, "utf8");
+  } catch (error) {
+    const code = String((error as { code?: unknown }).code ?? "UNKNOWN");
+    return code === "ENOENT" ? { status: "missing" } : { status: "unreadable", code };
   }
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    // JSON.parse messages can quote the content, so they are never surfaced.
+    return { status: "malformed", problem: "invalid JSON" };
+  }
+  const parsed = T3TokenSchema.safeParse(json);
+  if (parsed.success) return { status: "ok", token: parsed.data };
+  const problem = parsed.error.issues
+    .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.code}`)
+    .join(", ");
+  return { status: "malformed", problem };
+}
+
+/** Returns null unless the file holds a valid token; never exposes token content. */
+export function readT3Token(file: string): T3Token | null {
+  const load = loadT3Token(file);
+  return load.status === "ok" ? load.token : null;
+}
+
+/** Operator-facing reason for an unusable token file (no content). */
+export function describeT3TokenLoad(load: Exclude<T3TokenLoad, { status: "ok" }>): string {
+  if (load.status === "missing") return "no T3 access token file";
+  if (load.status === "unreadable") return `T3 access token file is unreadable (${load.code})`;
+  return `T3 access token file is malformed (${load.problem})`;
 }
 
 export function writeT3Token(file: string, token: T3Token): void {
@@ -66,6 +101,11 @@ export function tokenIsUsable(token: T3Token, now = Date.now()): boolean {
 /** Whole days remaining, rounded down; negative once expired. */
 export function daysLeft(expiresAt: string, now = Date.now()): number {
   return Math.floor((Date.parse(expiresAt) - now) / DAY_MS);
+}
+
+/** The `/mcp` resource a token must be bound to for the given origin. */
+export function mcpResource(origin: string): string {
+  return new URL("/mcp", origin).toString();
 }
 
 /** Default token location: next to the T3 registration file. */
