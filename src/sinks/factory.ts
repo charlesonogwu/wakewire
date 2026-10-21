@@ -13,26 +13,79 @@ import { CodexSdkAdapter } from "./codex-sdk.js";
 import { RefreshingDesktopMcpClient } from "./desktop-refreshing-client.js";
 import { MuseExecAdapter } from "./muse-exec.js";
 import { T3McpClient } from "./t3-mcp.js";
-import { T3ConfigSchema, T3ThreadAdapter } from "./t3-thread.js";
+import { OfficialT3McpClient } from "./t3-official-mcp.js";
+import { type T3Config, T3ConfigSchema, T3ThreadAdapter } from "./t3-thread.js";
 import type { AgentAdapter } from "./types.js";
+
+const T3RegistrationBase = T3ConfigSchema.safeExtend({
+  coordination: CoordinationConfigSchema.optional(),
+});
+/** Default transport: the pinned third-party stdio bridge (existing registrations). */
+const T3BridgeRegistration = T3RegistrationBase.safeExtend({
+  transport: z.literal("bridge").optional(),
+  serverPath: z.string().refine(path.isAbsolute),
+  serverSha256: z.string().regex(/^[a-f0-9]{64}$/),
+});
+/** T3 Code's own MCP endpoint with a token from `wakewire t3 login`. Bridge pins may stay
+ * in the file (ignored) so switching back is a one-line change. */
+const T3OfficialRegistration = T3RegistrationBase.safeExtend({
+  transport: z.literal("t3-official-mcp"),
+  tokenFile: z.string().refine(path.isAbsolute),
+  origin: z.string().optional(),
+  serverPath: z.string().refine(path.isAbsolute).optional(),
+  serverSha256: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
+});
+export type T3Registration =
+  | z.infer<typeof T3BridgeRegistration>
+  | z.infer<typeof T3OfficialRegistration>;
+
+export function parseT3Registration(raw: unknown): T3Registration {
+  const transport = (raw as { transport?: unknown } | null)?.transport;
+  return transport === "t3-official-mcp"
+    ? T3OfficialRegistration.parse(raw)
+    : T3BridgeRegistration.parse(raw);
+}
+
+function createT3Adapter(registration: T3Registration, logger: Logger): T3ThreadAdapter {
+  const targetConfig: T3Config = T3ConfigSchema.parse({
+    threadId: registration.threadId,
+    environmentId: registration.environmentId,
+    projectId: registration.projectId,
+    cwd: registration.cwd,
+    fallbackTargets: registration.fallbackTargets,
+    stateFile: registration.stateFile,
+    inheritPermissions: registration.inheritPermissions,
+  });
+  if (registration.transport === "t3-official-mcp") {
+    const client = new OfficialT3McpClient(
+      targetConfig,
+      { origin: registration.origin, tokenFile: registration.tokenFile },
+      logger,
+    );
+    logger.info(
+      {
+        adapter: "t3-thread",
+        transport: "t3-official-mcp",
+        origin: client.currentOrigin(),
+        pinned: Boolean(registration.origin),
+      },
+      "T3 sink uses T3 Code's MCP endpoint",
+    );
+    return new T3ThreadAdapter(targetConfig, client, logger);
+  }
+  return new T3ThreadAdapter(targetConfig, new T3McpClient(registration, logger), logger);
+}
 
 export function createAdapter(config: DaemonConfig, logger: Logger): AgentAdapter {
   switch (config.adapter) {
     case "t3-thread": {
       const file = process.env.WAKEWIRE_T3_REGISTRATION;
       if (!file) throw new Error("T3 adapter requires explicit local registration");
-      const registration = T3ConfigSchema.safeExtend({
-        serverPath: z.string().refine(path.isAbsolute),
-        serverSha256: z.string().regex(/^[a-f0-9]{64}$/),
-        coordination: CoordinationConfigSchema.optional(),
-      }).parse(JSON.parse(readFileSync(file, "utf8")));
-      const {
-        serverPath: _serverPath,
-        serverSha256: _serverSha256,
-        coordination: _coordination,
-        ...targetConfig
-      } = registration;
-      const t3 = new T3ThreadAdapter(targetConfig, new T3McpClient(registration, logger), logger);
+      const registration = parseT3Registration(JSON.parse(readFileSync(file, "utf8")));
+      const t3 = createT3Adapter(registration, logger);
       if (!registration.coordination) return t3;
       const snapshots = new GithubSnapshotClient(registration.coordination.expectedRepository);
       const completion = new CoordinationCompletionMonitor({

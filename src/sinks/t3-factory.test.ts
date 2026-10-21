@@ -96,3 +96,48 @@ it("wraps T3 in the existing coordination filter and completion monitor", async 
   await adapter.close?.();
   expect(close).toHaveBeenCalledTimes(1);
 });
+function officialRegistration(extra: Record<string, unknown> = {}) {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "wakewire-t3-factory-"));
+  dirs.push(dir);
+  const file = path.join(dir, "registration.json");
+  writeFileSync(
+    file,
+    JSON.stringify({
+      threadId: "primary",
+      environmentId: "env",
+      projectId: "project",
+      cwd: dir,
+      stateFile: path.join(dir, "receipts.db"),
+      inheritPermissions: true,
+      transport: "t3-official-mcp",
+      tokenFile: path.join(dir, "t3-mcp-token.json"),
+      origin: "http://127.0.0.1:9",
+      ...extra,
+    }),
+  );
+  vi.stubEnv("WAKEWIRE_T3_REGISTRATION", file);
+}
+it("selects T3 Code's MCP endpoint and holds without approved access", async () => {
+  officialRegistration();
+  const adapter = createAdapter(config, pino({ level: "silent" }));
+  adapters.push(adapter);
+  expect(adapter).toBeInstanceOf(T3ThreadAdapter);
+  await expect(adapter.probe()).resolves.toBe(false);
+});
+it("keeps bridge pins optional for the official transport but requires a token file", () => {
+  officialRegistration({
+    serverPath: path.join(os.tmpdir(), "x.js"),
+    serverSha256: "0".repeat(64),
+  });
+  adapters.push(createAdapter(config, pino({ level: "silent" })));
+  officialRegistration({ tokenFile: undefined });
+  expect(() => createAdapter(config, pino({ level: "silent" }))).toThrow();
+  officialRegistration({ origin: "https://t3.example.com" });
+  expect(() => createAdapter(config, pino({ level: "silent" }))).toThrow(/loopback/);
+});
+it("still requires bridge pins when no transport is set", () => {
+  officialRegistration({ transport: undefined });
+  expect(() => createAdapter(config, pino({ level: "silent" }))).toThrow();
+  officialRegistration({ transport: "something-else" });
+  expect(() => createAdapter(config, pino({ level: "silent" }))).toThrow();
+});
