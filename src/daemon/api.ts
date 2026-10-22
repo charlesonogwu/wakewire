@@ -8,6 +8,7 @@ import type { DeliveryStatus, Stores } from "../db/repos.js";
 import type { Logger } from "../logging.js";
 import type { SecretStore } from "../secrets/store.js";
 import { secretNames } from "../secrets/store.js";
+import type { SelftestReport } from "../selftest/checks.js";
 import type { AgentAdapter } from "../sinks/types.js";
 import { createSmeeChannel, GithubWebhookSource } from "../sources/github/source.js";
 import { GmailSourceConfigSchema } from "../sources/gmail/source.js";
@@ -27,6 +28,8 @@ export interface ApiContext {
   logger: Logger;
   startedAt: string;
   instanceId: string;
+  /** Runs every self-test check once: read-only apart from the signed pings; never heals or messages. */
+  selftest?: () => Promise<SelftestReport>;
   requestShutdown: () => void;
 }
 
@@ -68,6 +71,11 @@ export function createApi(ctx: ApiContext): Hono {
       sources: ctx.sources.statuses(),
       secretsBackend: ctx.secrets.backend,
     });
+  });
+
+  app.get("/api/selftest", async (c) => {
+    if (!ctx.selftest) return c.json({ error: "self-test unavailable" }, 503);
+    return c.json(await ctx.selftest());
   });
 
   app.post("/api/shutdown", async (c) => {

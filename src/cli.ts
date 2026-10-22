@@ -8,6 +8,7 @@ import { authImap } from "./cli/auth-imap.js";
 import { authSlack } from "./cli/auth-slack.js";
 import { authWebhook } from "./cli/auth-webhook.js";
 import { configGet, configList, configSet } from "./cli/config-cmd.js";
+import { selftest } from "./cli/selftest.js";
 import { installService, uninstallService } from "./cli/service.js";
 import { t3Login, t3Status } from "./cli/t3-login.js";
 import {
@@ -270,6 +271,16 @@ t3.command("status")
   .option("--origin <url>", "T3 server origin")
   .action((opts: T3AccessFlags) => {
     if (!t3Status(opts)) process.exitCode = 1;
+  });
+
+program
+  .command("selftest")
+  .description(
+    "Check T3, T3 access, the local listener and the public route; prints pass/fail with a reason",
+  )
+  .option("--json", "print the report as JSON")
+  .action(async (opts: { json?: boolean }) => {
+    if (!(await selftest(opts))) process.exitCode = 1;
   });
 
 program

@@ -6,6 +6,7 @@ import Database from "better-sqlite3";
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { T3ExpiryMonitor } from "./t3-expiry.js";
+import { T3NotSubmittedError } from "./t3-mcp.js";
 import { T3AuthRequiredError } from "./t3-official-mcp.js";
 import { T3ThreadAdapter, type T3ToolClient, t3ClientRequestId } from "./t3-thread.js";
 import { BusyError, PermanentError, UnreachableError } from "./types.js";
@@ -380,5 +381,59 @@ describe("T3 access expiry", () => {
     expect(notify).toHaveBeenCalledTimes(2);
     expect(notify.mock.calls[0]?.[1]).toBe(notify.mock.calls[1]?.[1]);
     db.close();
+  });
+});
+
+describe("self-test view of T3", () => {
+  it("verifies every registered target without sending anything", async () => {
+    const f = fixture({ expiresAt: "2026-11-20T00:00:00.000Z" });
+    expect(await f.adapter.operatorHealth()).toEqual({
+      targets: [
+        { threadId: "primary", ok: true },
+        { threadId: "orchestrator", ok: true },
+      ],
+      tokenExpiresAt: "2026-11-20T00:00:00.000Z",
+    });
+    expect(f.sends()).toEqual([]);
+  });
+
+  it("classifies failures by cause, carrying no T3 output", async () => {
+    const f = fixture();
+    f.failReads(new T3AuthRequiredError("T3 access missing, expired or rejected"));
+    expect((await f.adapter.operatorHealth()).targets[0]).toEqual({
+      threadId: "primary",
+      ok: false,
+      problem: "auth",
+    });
+    f.failReads(new T3NotSubmittedError("T3 MCP does not expose t3_thread_read"));
+    expect((await f.adapter.operatorHealth()).targets[0]?.problem).toBe("api-changed");
+    f.failReads(new Error("ECONNREFUSED"));
+    expect((await f.adapter.operatorHealth()).targets[0]?.problem).toBe("unreachable");
+    f.failReads(null);
+    const orchestrator = f.threads.get("orchestrator");
+    if (!orchestrator) throw new Error("fixture has an orchestrator thread");
+    f.threads.set("orchestrator", { ...orchestrator, archived: true });
+    expect((await f.adapter.operatorHealth()).targets[1]?.problem).toBe("mismatch");
+  });
+
+  it("sends operator notices to the orchestrator fallback in queue mode", async () => {
+    const f = fixture();
+    expect(
+      await f.adapter.notifyOperator(
+        "WakeWire self-test: all checks passed.",
+        "wakewire-selftest-1",
+      ),
+    ).toBe(true);
+    expect(f.sends()).toEqual([
+      {
+        name: "send_message",
+        args: {
+          threadId: "orchestrator",
+          message: "WakeWire self-test: all checks passed.",
+          mode: "queue",
+          clientRequestId: "wakewire-selftest-1",
+        },
+      },
+    ]);
   });
 });

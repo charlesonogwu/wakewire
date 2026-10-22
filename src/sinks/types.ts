@@ -35,8 +35,24 @@ export interface AgentAdapter {
   probe(): Promise<boolean>;
   /** Sanitized metadata; never exposes prompts or task identifiers. */
   coordinationJobs?(): CompletionJobStatus[];
+  /** Self-test: per-target reachability plus token expiry; null when the adapter has no such view. */
+  operatorHealth?(): Promise<OperatorHealth | null>;
+  /** Self-test: one short operator notice (idempotent per clientRequestId); false when unsupported. */
+  notifyOperator?(message: string, clientRequestId: string): Promise<boolean>;
   /** Release connections/child processes on daemon shutdown. */
   close?(): void | Promise<void>;
+}
+
+/**
+ * Why a registered target could not be verified. "auth" needs Charles to re-approve
+ * (`wakewire t3 login`); "api-changed" needs a code change; neither is ever self-healed.
+ */
+export type TargetProblem = "auth" | "api-changed" | "mismatch" | "unreachable";
+
+export interface OperatorHealth {
+  targets: { threadId: string; ok: boolean; problem?: TargetProblem }[];
+  /** Expiry of the stored access token (never the token); null when there is none. */
+  tokenExpiresAt: string | null;
 }
 
 /** The target thread has a turn in flight. Retry later; never a failure. */
