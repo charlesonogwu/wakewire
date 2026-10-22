@@ -17,6 +17,7 @@ export interface CoordinationSnapshot {
   body: string;
   labels: readonly string[];
   checks: "success" | "pending" | "failure";
+  mergeable?: boolean | null;
   comments: readonly ReviewComment[];
 }
 export interface CoordinationConfig {
@@ -95,8 +96,6 @@ export function evaluateCoordination(
   if (snapshot.state === "closed" || snapshot.repository !== config.expectedRepository) {
     return result("ignore", "Closed or foreign repository");
   }
-  if (snapshot.labels.includes("blocked:coordination"))
-    return result("blocked", "Manual coordination block");
   if (!validSha(snapshot.headSha) || snapshot.headRepository !== config.expectedRepository) {
     return result("blocked", "Invalid head SHA or fork head");
   }
@@ -132,11 +131,29 @@ export function evaluateCoordination(
       !snapshot.labels.includes(`agent:${owner}`)
     )
       return result("blocked", "Rigorous ownership label mismatch");
+    if (rigorous.action !== "blocked") {
+      const refresh = refreshDecision();
+      if (refresh) return refresh;
+    }
     return {
       ...result(rigorous.action, rigorous.reason),
       stage: rigorous.stage,
       stageKey: rigorous.stageKey,
       ...(rigorous.readiness ? { readiness: rigorous.readiness } : {}),
+    };
+  }
+  if (snapshot.labels.includes("blocked:coordination"))
+    return result("blocked", "Manual coordination block");
+  function refreshDecision(): CoordinationResult | null {
+    if (snapshot.mergeable === null) return result("wait", "Mergeability is unknown");
+    if (snapshot.mergeable !== false) return null;
+    return {
+      ...result(
+        config.localAgent === owner ? "refresh:owner" : "wait",
+        "Owner must refresh conflicting branch from main",
+      ),
+      stage: "refresh:owner",
+      stageKey: `${snapshot.repository}:${snapshot.number}:${snapshot.headSha}:refresh:owner:none`,
     };
   }
   const approvalLabels = agents.map((agent) => `approved:${agent}`);
@@ -196,6 +213,8 @@ export function evaluateCoordination(
   }
   if (agents.some((agent) => latest[agent]?.decision === "reject"))
     return result("blocked", "Current review rejects head");
+  const refresh = refreshDecision();
+  if (refresh) return refresh;
   if (
     agents.some(
       (agent) => labels.includes(`approved:${agent}`) && latest[agent]?.decision !== "approve",

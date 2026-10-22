@@ -178,7 +178,7 @@ export interface ApiResponse<T = unknown> {
 
 export async function apiFetch<T = unknown>(
   path: string,
-  init: { method?: string; body?: unknown } = {},
+  init: { method?: string; body?: unknown; timeoutMs?: number } = {},
 ): Promise<ApiResponse<T>> {
   const state = readDaemonState();
   if (!state) throw new DaemonNotRunningError("no state file");
@@ -205,7 +205,7 @@ export async function apiFetch<T = unknown>(
         response,
         body: mutation ? await response.json() : await readJson(response, signal),
       }),
-      mutation ? 2_000 : 5_000,
+      init.timeoutMs ?? (mutation ? 2_000 : 5_000),
     );
     return { status: result.response.status, body: result.body as T };
   } catch (err) {

@@ -590,3 +590,30 @@ it("rigorous completion supersedes a changed SHA and separates revised same-stag
   expect(monitor.list().find((job) => job.id === id)?.state).toBe("superseded");
   await monitor.close();
 });
+
+it("supersedes an owner refresh after the branch head changes", async () => {
+  const f = fixture();
+  const snapshot = f.snapshot();
+  snapshot.number = 7;
+  snapshot.labels = ["agent:codex"];
+  snapshot.mergeable = false;
+  snapshot.comments = [];
+  f.update(snapshot);
+  const decision = evaluateCoordination(snapshot, config);
+  expect(decision.action).toBe("refresh:owner");
+  const monitor = f.create();
+  const id = monitor.register({
+    ...f.job,
+    action: "refresh:owner",
+    baselineVote: decision.stageKey ?? null,
+  });
+  monitor.acknowledge(id);
+  snapshot.headSha = newHead;
+  snapshot.mergeable = true;
+  f.update(snapshot);
+  f.advance(5 * 60_000);
+  await monitor.tick();
+  expect(monitor.list()[0]?.state).toBe("superseded");
+  expect(f.sent).not.toHaveBeenCalled();
+  await monitor.close();
+});

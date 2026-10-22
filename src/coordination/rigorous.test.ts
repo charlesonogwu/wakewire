@@ -163,8 +163,14 @@ it("keeps revise cycles tied to the active challenge and requires a new response
 it("manual block, wrong actor trust, fork and closed PR remain gated", () => {
   const ready = snapshot([evidence, challenge, response, verdict]);
   expect(
-    evaluateCoordination({ ...ready, labels: ["agent:codex", "blocked:coordination"] }, config)
-      .action,
+    evaluateCoordination(
+      {
+        ...ready,
+        comments: [...ready.comments, record("agent-manual-block:v1", "actor: orchestrator", 9)],
+        labels: ["agent:codex", "blocked:coordination"],
+      },
+      config,
+    ).action,
   ).toBe("blocked");
   expect(evaluateCoordination({ ...ready, headRepository: "foreign/project" }, config).action).toBe(
     "blocked",
@@ -262,4 +268,37 @@ it("a trusted manual block applies only to its exact current head", () => {
   expect(
     evaluateCoordination({ ...snapshot([block]), headSha: "f".repeat(40) }, config).action,
   ).toBe("wait");
+});
+
+describe("owner refresh and provider recovery", () => {
+  it("wakes only the owner for a confirmed current-head conflict", () => {
+    const pr = { ...snapshot([evidence]), mergeable: false };
+    expect(evaluateCoordination(pr, config)).toMatchObject({
+      action: "refresh:owner",
+      stageKey: `${config.expectedRepository}:130:${sha}:refresh:owner:none`,
+    });
+    expect(evaluateCoordination(pr, { ...config, localAgent: "hermes" }).action).toBe("wait");
+  });
+  it("waits for unknown mergeability instead of declaring readiness or requesting refresh", () => {
+    const pr = { ...snapshot([evidence, challenge, response, verdict]), mergeable: null };
+    expect(evaluateCoordination(pr, config).action).toBe("wait");
+  });
+  it("ignores retryable provider failures and stale block labels, but honors current terminal records", () => {
+    const failure = {
+      ...record("ignored", "", 8),
+      body: `<!-- agent-coordination-failure:v1\nworker: review\nhead-sha: ${sha}\nconfig-fingerprint: ${"a".repeat(64)}\ncategory: all-models-unavailable\nattempts: 3\n-->`,
+    };
+    const pr = {
+      ...snapshot([evidence, failure]),
+      mergeable: false,
+      labels: ["agent:codex", "blocked:coordination"],
+    };
+    expect(evaluateCoordination(pr, config).action).toBe("refresh:owner");
+    failure.body = failure.body.replace("all-models-unavailable", "agent-blocked");
+    expect(evaluateCoordination(pr, config).action).toBe("blocked");
+    failure.body = failure.body.replace(sha, "a".repeat(40));
+    expect(evaluateCoordination(pr, config).action).toBe("refresh:owner");
+    pr.comments = [...pr.comments, record("agent-manual-block:v1", "actor: orchestrator", 9)];
+    expect(evaluateCoordination(pr, config).action).toBe("blocked");
+  });
 });

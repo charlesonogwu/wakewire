@@ -15,6 +15,9 @@ import {
 import type { Logger } from "../logging.js";
 import { daemonLockFilePath, stateFilePath, wakewireHome } from "../paths.js";
 import { createSecretStore } from "../secrets/store.js";
+import { runChecks } from "../selftest/checks.js";
+import { readT3Runtime, SelftestMonitor } from "../selftest/monitor.js";
+import { createTailscale, toggleFunnel } from "../selftest/tailscale.js";
 import { createAdapter } from "../sinks/factory.js";
 import { prepareWorktree } from "../sinks/worktree.js";
 import { GithubWebhookSource } from "../sources/github/source.js";
@@ -56,6 +59,7 @@ export class Daemon {
   private server: Server | null = null;
   private ingressServer: Server | null = null;
   private adapter: import("../sinks/types.js").AgentAdapter | null = null;
+  private selftest: SelftestMonitor | null = null;
   private db: ReturnType<typeof openDatabase> | null = null;
   private owner: ExclusiveOwner | null = null;
   private ownershipHandle: number | null = null;
@@ -115,6 +119,20 @@ export class Daemon {
     });
     this.sources = sources;
 
+    const tailscale = createTailscale();
+    const runSelftest = () =>
+      runChecks({
+        operatorHealth: () => adapter.operatorHealth?.() ?? Promise.resolve(null),
+        ingress: ingress && {
+          port: ingress.port,
+          ping: async () => {
+            const source = sources.get(ingress.sourceId);
+            return source instanceof GithubWebhookSource ? source.selftestPing() : null;
+          },
+        },
+        tailscale,
+      });
+
     const startedAt = new Date().toISOString();
     const api = createApi({
       stores,
@@ -126,6 +144,7 @@ export class Daemon {
       logger: this.logger,
       startedAt,
       instanceId,
+      selftest: runSelftest,
       requestShutdown: () => {
         void this.stop();
       },
@@ -176,6 +195,17 @@ export class Daemon {
       }
     }
 
+    this.selftest = new SelftestMonitor({
+      checks: runSelftest,
+      notify: (message, clientRequestId) =>
+        adapter.notifyOperator?.(message, clientRequestId) ?? Promise.resolve(false),
+      toggle: (funnel) => toggleFunnel(tailscale, funnel),
+      readRuntime: () => readT3Runtime(),
+      settings: stores.settings,
+      logger: this.logger.child({ component: "selftest" }),
+    });
+    this.selftest.start();
+
     this.logger.info(
       { port, adapter: adapter.name, version: VERSION },
       "wakewire daemon ready on 127.0.0.1",
@@ -197,6 +227,7 @@ export class Daemon {
 
   private async stopOwned(): Promise<void> {
     this.logger.info("daemon shutting down");
+    this.selftest?.stop();
     await this.queue?.stop();
     await this.sources?.stopAll();
     await new Promise<void>((resolve) => {
