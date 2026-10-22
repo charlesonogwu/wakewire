@@ -36,6 +36,18 @@ export async function serveStatus(tailscale: Tailscale): Promise<unknown | null>
   }
 }
 
+/** BackendState from `tailscale status --json` ("Running", "NeedsLogin", ...), or null. */
+export async function backendState(tailscale: Tailscale): Promise<string | null> {
+  const result = await tailscale(["status", "--json"]);
+  if (!result.ok) return null;
+  try {
+    const state = (JSON.parse(result.stdout) as { BackendState?: unknown }).BackendState;
+    return typeof state === "string" && /^[A-Za-z]{1,32}$/.test(state) ? state : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Key-sorted JSON, so two serve configs compare by content rather than key order. */
 export function canonicalJson(value: unknown): string {
   return JSON.stringify(value, (_key, item: unknown) =>
@@ -54,13 +66,17 @@ export type ToggleResult =
   | { outcome: "off-failed" }
   /** "off" worked but "on" failed twice: the public route is gone until someone restores it. */
   | { outcome: "route-removed"; before: string; restore: string }
-  | { outcome: "status-unavailable" };
+  | { outcome: "status-unavailable" }
+  /** Tailscale itself is down or logged out (e.g. key expiry): toggling could only make it worse. */
+  | { outcome: "not-running"; state: string };
 
 /**
  * The one proven fix: turn this port's funnel off and on again with the target
  * Tailscale already holds. Nothing else in the serve config is touched.
  */
 export async function toggleFunnel(tailscale: Tailscale, funnel: Funnel): Promise<ToggleResult> {
+  const state = await backendState(tailscale);
+  if (state !== "Running") return { outcome: "not-running", state: state ?? "unknown" };
   const before = await serveStatus(tailscale);
   if (before === null) return { outcome: "status-unavailable" };
   const port = `--https=${funnel.port}`;

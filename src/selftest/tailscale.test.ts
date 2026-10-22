@@ -23,12 +23,15 @@ const CONFIG = {
 function fakeTailscale(script: {
   statuses?: unknown[];
   fail?: (args: string[], call: number) => boolean;
+  backend?: string;
 }) {
   const calls: string[][] = [];
   const statuses = [...(script.statuses ?? [CONFIG, CONFIG])];
   const tailscale: Tailscale = async (args) => {
     calls.push(args);
     if (script.fail?.(args, calls.length)) return { ok: false, stdout: "" };
+    if (args[0] === "status")
+      return { ok: true, stdout: JSON.stringify({ BackendState: script.backend ?? "Running" }) };
     if (args[0] === "serve") {
       const next = statuses.shift();
       return next === undefined
@@ -48,6 +51,7 @@ describe("toggleFunnel", () => {
       identical: true,
     });
     expect(calls).toEqual([
+      ["status", "--json"],
       ["serve", "status", "--json"],
       ["funnel", "--https=8443", "off"],
       ["funnel", "--bg", "--https=8443", "http://127.0.0.1:8769"],
@@ -73,7 +77,7 @@ describe("toggleFunnel", () => {
     expect(await toggleFunnel(unreadable.tailscale, FUNNEL)).toEqual({
       outcome: "status-unavailable",
     });
-    expect(unreadable.calls).toHaveLength(1);
+    expect(unreadable.calls).toHaveLength(2);
     const offFails = fakeTailscale({ fail: (args) => args.includes("off") });
     expect(await toggleFunnel(offFails.tailscale, FUNNEL)).toEqual({ outcome: "off-failed" });
     expect(offFails.calls.some((args) => args.includes("--bg"))).toBe(false);
@@ -88,6 +92,19 @@ describe("toggleFunnel", () => {
       restore: "tailscale funnel --bg --https=8443 http://127.0.0.1:8769",
     });
     expect(twice.calls.filter((args) => args.includes("--bg"))).toHaveLength(2);
+  });
+});
+
+describe("toggleFunnel when Tailscale itself is down", () => {
+  it("touches nothing while the node is logged out or stopped", async () => {
+    for (const backend of ["NeedsLogin", "Stopped"]) {
+      const down = fakeTailscale({ backend });
+      expect(await toggleFunnel(down.tailscale, FUNNEL)).toEqual({
+        outcome: "not-running",
+        state: backend,
+      });
+      expect(down.calls).toEqual([["status", "--json"]]);
+    }
   });
 });
 

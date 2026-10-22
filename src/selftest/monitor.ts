@@ -25,6 +25,8 @@ const KEYS = {
   heal: "selftest.heal",
   runtime: "selftest.t3runtime",
   notice: "selftest.t3notice",
+  /** What a heal did, kept until a message carrying it is actually sent. */
+  healNote: "selftest.healnote",
 } as const;
 
 const LABEL: Record<CheckName, string> = {
@@ -144,7 +146,10 @@ export class SelftestMonitor {
     this.timers.push(timer);
   }
 
-  /** Records T3's current version and start time; true when either changed since last seen. */
+  /**
+   * Records T3's current version and start time; true when either changed since last seen.
+   * Any change re-runs the checks, but only a new version earns a message of its own.
+   */
   private observeRuntime(): boolean {
     const runtime = this.deps.readRuntime();
     if (!runtime) return false;
@@ -153,8 +158,21 @@ export class SelftestMonitor {
     if (previous === key) return false;
     this.deps.settings.set(KEYS.runtime, key);
     if (previous === null) return false;
-    this.deps.settings.set(KEYS.notice, JSON.stringify({ from: previous, to: key }));
+    const updated = !previous.startsWith(`${runtime.serverVersion} started `);
+    // An unsent update notice survives a later same-version restart.
+    if (updated || !this.pendingNotice()?.updated)
+      this.deps.settings.set(KEYS.notice, JSON.stringify({ from: previous, to: key, updated }));
     return true;
+  }
+
+  private pendingNotice(): { from: string; to: string; updated: boolean } | null {
+    try {
+      return z
+        .object({ from: z.string(), to: z.string(), updated: z.boolean().default(true) })
+        .parse(JSON.parse(this.deps.settings.get(KEYS.notice) ?? ""));
+    } catch {
+      return null;
+    }
   }
 
   private async run(triggers: Set<Trigger>): Promise<void> {
@@ -177,10 +195,12 @@ export class SelftestMonitor {
         this.setHeal({ attempted: true });
         const outcome = await this.heal(report.funnel);
         healed = outcome.note;
+        // Kept until a message carrying it is sent: T3 is often still down right after a reboot.
+        this.deps.settings.set(KEYS.healNote, healed);
         if (outcome.recheck) report = await this.deps.checks();
         if (!failing(report, "public-route")) this.setHeal({ attempted: false });
       }
-      await this.report(report, healed);
+      await this.report(report, healed ?? (this.deps.settings.get(KEYS.healNote) || null));
     } catch (error) {
       this.deps.logger.error(
         { err: error instanceof Error ? error.name : "unknown" },
@@ -213,39 +233,45 @@ export class SelftestMonitor {
         note: "WakeWire wanted to turn the funnel off and on, but could not read Tailscale's serve config, so it changed nothing.",
         recheck: false,
       };
+    if (result.outcome === "not-running")
+      return {
+        note: `Tailscale is not running or not logged in (state ${result.state}), so WakeWire did not touch the funnel. For a human: log Tailscale back in.`,
+        recheck: false,
+      };
     if (result.outcome === "off-failed")
       return {
         note: `WakeWire tried to turn the funnel for ${where} off and on, but turning it off failed, so nothing changed.`,
         recheck: false,
       };
     if (result.outcome === "route-removed") {
-      await this.send(
-        [
-          `URGENT from WakeWire: GitHub cannot reach WakeWire. To fix the public route it turned the Tailscale Funnel for ${where} off, but turning it back on failed twice.`,
-          `For a human: run \`${result.restore}\`, then \`tailscale serve status --json\` and compare with the config before:`,
-          result.before,
-        ].join("\n"),
-        `urgent-removed-${result.before}`,
-      );
+      const urgent = [
+        `URGENT from WakeWire: GitHub cannot reach WakeWire. To fix the public route it turned the Tailscale Funnel for ${where} off, but turning it back on failed twice.`,
+        `For a human: run \`${result.restore}\`, then \`tailscale serve status --json\` and compare with the config before:`,
+        result.before,
+      ].join("\n");
+      const sent = await this.send(urgent, `urgent-removed-${result.before}`);
       this.deps.logger.error({ funnel: where }, "funnel off but not back on; route removed");
       return {
-        note: `WakeWire turned the funnel for ${where} off, but could not turn it back on (sent separately as URGENT).`,
+        note: sent
+          ? `WakeWire turned the funnel for ${where} off, but could not turn it back on (sent separately as URGENT).`
+          : `WakeWire turned the funnel for ${where} off, but could not turn it back on. ${urgent}`,
         recheck: false,
       };
     }
-    if (!result.identical)
-      await this.send(
-        [
-          `URGENT from WakeWire: it turned the Tailscale Funnel for ${where} off and on, and Tailscale's serve config is no longer identical.`,
-          "For a human: compare the two and restore anything missing.",
-          `Before: ${result.before}`,
-          `After: ${result.after ?? "(could not be read)"}`,
-        ].join("\n"),
-        `urgent-changed-${result.before}-${result.after}`,
-      );
+    let changed = "serve config CHANGED, sent as URGENT";
+    if (!result.identical) {
+      const urgent = [
+        `URGENT from WakeWire: it turned the Tailscale Funnel for ${where} off and on, and Tailscale's serve config is no longer identical.`,
+        "For a human: compare the two and restore anything missing.",
+        `Before: ${result.before}`,
+        `After: ${result.after ?? "(could not be read)"}`,
+      ].join("\n");
+      if (!(await this.send(urgent, `urgent-changed-${result.before}-${result.after}`)))
+        changed = `serve config CHANGED. ${urgent}`;
+    }
     await (this.deps.sleep ?? sleep)(HEAL_RECHECK_MS);
     return {
-      note: `WakeWire turned the Tailscale Funnel for ${where} off and on again (${result.identical ? "serve config unchanged" : "serve config CHANGED, sent as URGENT"}) and checked again 3 minutes later.`,
+      note: `WakeWire turned the Tailscale Funnel for ${where} off and on again (${result.identical ? "serve config unchanged" : changed}) and checked again 3 minutes later.`,
       recheck: true,
     };
   }
@@ -288,12 +314,12 @@ export class SelftestMonitor {
         lines.push("  Left for a human: nothing.");
       }
     }
-    const notice = this.deps.settings.get(KEYS.notice);
+    const notice = this.pendingNotice();
     let header = "WakeWire self-test";
-    if (notice) {
-      const change = z.object({ from: z.string(), to: z.string() }).safeParse(JSON.parse(notice));
-      if (change.success)
-        header = `WakeWire self-test after T3 changed (was ${change.data.from}; now ${change.data.to})`;
+    if (notice && (notice.updated || lines.length > 0)) {
+      header = notice.updated
+        ? `WakeWire self-test after T3 changed (was ${notice.from}; now ${notice.to})`
+        : `WakeWire self-test after T3 restarted (now ${notice.to})`;
       if (lines.length === 0)
         lines.push(
           report.checks.some((check) => check.status === "fail")
@@ -304,11 +330,16 @@ export class SelftestMonitor {
         if (check.status === "fail" && !lines.some((line) => line.includes(check.reason)))
           lines.push(`Still failing, ${LABEL[check.name]}: ${check.reason}.`);
     }
-    if (lines.length === 0) return;
+    if (lines.length === 0) {
+      // A restart on the same version with nothing new to say is not worth a message.
+      if (notice) this.deps.settings.set(KEYS.notice, "");
+      return;
+    }
     const message = [`${header}:`, ...lines].join("\n");
     if (await this.send(message, `${report.at}\n${message}`)) {
       this.deps.settings.set(KEYS.reported, JSON.stringify(next));
-      if (notice) this.deps.settings.set(KEYS.notice, "");
+      this.deps.settings.set(KEYS.notice, "");
+      this.deps.settings.set(KEYS.healNote, "");
     }
   }
 

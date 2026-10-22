@@ -153,7 +153,7 @@ describe("SelftestMonitor triggers", () => {
     h.monitor.stop();
   });
 
-  it("reports one result after T3 updates or restarts, and nothing for the first sighting", async () => {
+  it("reports one result after a T3 update, and nothing for the first sighting", async () => {
     const h = harness({ runtime: { serverVersion: "0.1.0", startedAt: "2026-10-19T19:00:00Z" } });
     h.monitor.start();
     await vi.advanceTimersByTimeAsync(STARTUP_DELAY_MS);
@@ -167,6 +167,25 @@ describe("SelftestMonitor triggers", () => {
     expect(h.sent[0]?.message).toContain("All checks passed.");
     await vi.advanceTimersByTimeAsync(RUNTIME_POLL_MS * 3);
     expect(h.sent).toHaveLength(1);
+    h.monitor.stop();
+  });
+
+  it("re-checks after a T3 restart on the same version but stays quiet when nothing changed", async () => {
+    const h = harness({ runtime: { serverVersion: "0.1.1", startedAt: "2026-10-21T22:54:51Z" } });
+    h.monitor.start();
+    await vi.advanceTimersByTimeAsync(STARTUP_DELAY_MS);
+    h.setRuntime({ serverVersion: "0.1.1", startedAt: "2026-10-22T08:00:00Z" });
+    await vi.advanceTimersByTimeAsync(RUNTIME_POLL_MS + T3_SETTLE_MS);
+    expect(h.deps.checks).toHaveBeenCalledTimes(2);
+    expect(h.sent).toEqual([]);
+    // A real change after a same-version restart is still reported.
+    h.next("route-timeout");
+    h.setRuntime({ serverVersion: "0.1.1", startedAt: "2026-10-22T09:00:00Z" });
+    await vi.advanceTimersByTimeAsync(RUNTIME_POLL_MS + T3_SETTLE_MS);
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]?.message).toMatch(
+      /^WakeWire self-test after T3 restarted \(now 0\.1\.1 started 2026-10-22T09:00:00Z\):\nFAILED, public route/,
+    );
     h.monitor.stop();
   });
 
@@ -254,6 +273,25 @@ describe("SelftestMonitor self-heal", () => {
     // A new failure episode may heal again.
     await h.monitor.trigger("heartbeat");
     expect(h.toggles).toHaveLength(2);
+  });
+
+  it("keeps a heal done while T3 is down and reports it once T3 is back", async () => {
+    const h = harness({ runtime: { serverVersion: "0.1.1", startedAt: "2026-10-21T22:30:00Z" } });
+    h.failNotify(true);
+    h.next("route-healable", "ok", "ok");
+    await h.monitor.trigger("heartbeat");
+    expect(h.toggles).toHaveLength(1);
+    expect(h.sent).toEqual([]);
+    // T3 comes up later; the route already passes, so only the kept note explains what happened.
+    h.failNotify(false);
+    await h.monitor.trigger("t3-changed");
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]?.message).toContain("RECOVERED, public route");
+    expect(h.sent[0]?.message).toContain(
+      "What WakeWire did: WakeWire turned the Tailscale Funnel for host.example.ts.net:8443 off and on again",
+    );
+    await h.monitor.trigger("heartbeat");
+    expect(h.sent).toHaveLength(1);
   });
 
   it("never heals any other failure", async () => {
