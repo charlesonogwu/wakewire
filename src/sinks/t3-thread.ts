@@ -5,11 +5,14 @@ import { z } from "zod";
 import type { Logger } from "../logging.js";
 import { T3ExpiryMonitor } from "./t3-expiry.js";
 import { T3NotSubmittedError } from "./t3-mcp.js";
+import { T3AuthRequiredError } from "./t3-official-mcp.js";
 import {
   type AgentAdapter,
   BusyError,
   type DeliveryOptions,
+  type OperatorHealth,
   PermanentError,
+  type TargetProblem,
   UnreachableError,
 } from "./types.js";
 
@@ -120,6 +123,14 @@ function unpack(raw: unknown): unknown {
   const parts = result.content.filter((part) => part.type === "text");
   if (parts.length !== 1 || !parts[0]?.text) throw new Error("Invalid T3 response");
   return JSON.parse(parts[0].text);
+}
+/** Classified by error class only; no T3 output is ever carried along. */
+function targetProblem(error: unknown): TargetProblem {
+  if (error instanceof T3AuthRequiredError) return "auth";
+  if (error instanceof PermanentError) return "mismatch";
+  if (error instanceof T3NotSubmittedError && error.message.startsWith("T3 MCP does not expose"))
+    return "api-changed";
+  return "unreachable";
 }
 const cwd = (value: string) =>
   process.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value);
@@ -513,6 +524,23 @@ export class T3ThreadAdapter implements AgentAdapter {
     } catch {
       return false;
     }
+  }
+  /** Verifies every registered target without sending anything. */
+  async operatorHealth(): Promise<OperatorHealth> {
+    const targets: OperatorHealth["targets"] = [];
+    for (const target of [this.config, ...this.config.fallbackTargets]) {
+      try {
+        await this.verify(target);
+        targets.push({ threadId: target.threadId, ok: true });
+      } catch (error) {
+        targets.push({ threadId: target.threadId, ok: false, problem: targetProblem(error) });
+      }
+    }
+    return { targets, tokenExpiresAt: this.client.tokenExpiresAt?.() ?? null };
+  }
+  async notifyOperator(message: string, clientRequestId: string): Promise<boolean> {
+    await this.notify(message, clientRequestId);
+    return true;
   }
   async close() {
     if (this.expiryTimer) clearInterval(this.expiryTimer);

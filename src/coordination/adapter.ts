@@ -244,6 +244,12 @@ export class CoordinationAdapter implements AgentAdapter {
   probe() {
     return this.inner.probe();
   }
+  operatorHealth() {
+    return this.inner.operatorHealth?.() ?? Promise.resolve(null);
+  }
+  notifyOperator(message: string, clientRequestId: string) {
+    return this.inner.notifyOperator?.(message, clientRequestId) ?? Promise.resolve(false);
+  }
   coordinationJobs() {
     return this.completion?.list() ?? [];
   }
