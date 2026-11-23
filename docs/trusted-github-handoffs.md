@@ -178,13 +178,24 @@ receiver was offline require explicit reconciliation; do not assume automatic
 GitHub redelivery. Likewise, an uncertain Desktop acceptance requires inspection,
 not deleting its receipt and retrying blindly.
 
-## Deployment is not a webhook command
+## Completion monitoring for the registered Codex task
 
-A trusted comment, review, or check can be stored as a signed receipt. It does
-not merge, deploy, or enable activation. Merge remains an operator action on
-GitHub. After an owner compare-and-swap enables activation, the coordinator
-reads fresh GitHub state instead of trusting the stored receipt. The dry-run
-command uses the placeholder repository `example/one`. The recovery command
-accepts the fenced repository, intent, and token. The observed runtime comes from
-the host's fixed observer, never from a caller-supplied manifest hash.
-Neither command takes a repository path, shell command, or merge flag.
+When coordination is enabled in the private Desktop registration, actionable
+`fix`, `review`, and `verify` wakes are also recorded in the existing private
+Desktop SQLite state file. Acceptance by Desktop is not counted as completion.
+WakeWire checks fresh GitHub evidence after five minutes and only closes a job
+when the current exact-SHA handoff or review proves the requested action finished.
+The monitor never creates another task or changes GitHub, a provider, or production.
+
+If a job remains unfinished, WakeWire permits at most four accepted wakes in
+total, including the first one and any changed review-comment wakes; automatic
+resumes use only the remaining allowance. A busy task does not spend an attempt.
+An uncertain Desktop delivery is
+never blindly resent. After the limit or repeated GitHub readback failures, the
+job becomes `needs-attention` and one separate notice asks the task to tell the
+user. This notice is not approval or authorization for merge or deployment.
+
+The authenticated local `GET /api/coordination/jobs` endpoint returns job state,
+PR number, starting SHA, action, accepted-wake count, timestamps, and a short
+reason. It does not return task IDs, prompts, comments, or credentials. This
+monitor is opt-in and does not retrofit jobs from before it was enabled.

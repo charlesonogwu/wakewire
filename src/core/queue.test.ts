@@ -108,6 +108,22 @@ describe("DeliveryQueue", () => {
     });
     route = stores.routes.create(routeInput());
   });
+
+  it("waits for an in-flight delivery before shutdown completes", async () => {
+    adapter.block();
+    queue.enqueueEvent(route, makeEvent("shutdown-delivery"));
+    const running = queue.tick();
+    let stopped = false;
+    const stopping = queue.stop().then(() => {
+      stopped = true;
+    });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    adapter.unblock();
+    await running;
+    await stopping;
+    expect(stopped).toBe(true);
+  });
   it("preserves delivery identities when the adapter forbids digest coalescing", async () => {
     Object.assign(adapter, { supportsCoalescing: false });
     const r = stores.routes.create(routeInput({ name: "durable", rateLimitPerMinute: 1 }));

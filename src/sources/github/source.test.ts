@@ -85,3 +85,35 @@ describe("GitHub source lifecycle", () => {
     },
   );
 });
+
+describe("GitHub source self-test ping", () => {
+  it("signs a recognizable ping that this source answers with pong and never counts", async () => {
+    const { source, events } = fixture();
+    const ping = await source.selftestPing();
+    if (!ping) throw new Error("expected a ping");
+    expect(ping.deliveryId).toMatch(/^wakewire-selftest-[0-9a-f-]{36}$/);
+    expect(
+      await signatureVerification.verifyGithubSignature(secret, ping.body, ping.signature),
+    ).toBe(true);
+    expect(
+      await source.handleWebhook({
+        eventName: "ping",
+        deliveryId: ping.deliveryId,
+        signature: ping.signature,
+        rawBody: ping.body,
+      }),
+    ).toEqual({ status: 200, message: "pong" });
+    expect(events).toHaveLength(0);
+    expect(source.status()).toMatchObject({ received: 0 });
+  });
+
+  it("has nothing to sign without a webhook secret", async () => {
+    const source = new GithubWebhookSource(
+      "no-secret",
+      { mode: "listen" },
+      { backend: "keychain", get: () => null, set: () => {}, delete: () => {} },
+      { emit: () => {}, logger: pino({ level: "silent" }) },
+    );
+    expect(await source.selftestPing()).toBeNull();
+  });
+});

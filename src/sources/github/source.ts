@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { sign } from "@octokit/webhooks-methods";
 import { SmeeClient } from "smee-client";
 import { z } from "zod";
 import type { SecretStore } from "../../secrets/store.js";
@@ -117,6 +119,23 @@ export class GithubWebhookSource implements Source {
     if (result.status >= 400) {
       this.ctx.logger.warn({ source: this.id, reason: result.message }, "smee event rejected");
     }
+  }
+
+  /**
+   * A GitHub `ping` signed with this source's own secret, for WakeWire's self-test.
+   * Only a daemon holding the same secret answers it with "pong", and a ping is
+   * never counted or routed. Null when no secret is set. Callers must never log
+   * the signature.
+   */
+  async selftestPing(): Promise<{ deliveryId: string; body: string; signature: string } | null> {
+    const secret = this.secrets.get(secretNames.githubWebhookSecret(this.id));
+    if (!secret) return null;
+    const body = JSON.stringify({ zen: "WakeWire self-test", hook_id: 0 });
+    return {
+      deliveryId: `wakewire-selftest-${randomUUID()}`,
+      body,
+      signature: await sign(secret, body),
+    };
   }
 
   /**

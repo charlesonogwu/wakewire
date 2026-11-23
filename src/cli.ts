@@ -8,7 +8,9 @@ import { authImap } from "./cli/auth-imap.js";
 import { authSlack } from "./cli/auth-slack.js";
 import { authWebhook } from "./cli/auth-webhook.js";
 import { configGet, configList, configSet } from "./cli/config-cmd.js";
+import { selftest } from "./cli/selftest.js";
 import { installService, uninstallService } from "./cli/service.js";
+import { t3Login, t3Status } from "./cli/t3-login.js";
 import {
   apiFetch,
   inspectDaemonState,
@@ -19,15 +21,6 @@ import { loadConfig } from "./config.js";
 import { runDaemon } from "./daemon/daemon.js";
 import { openDatabase } from "./db/db.js";
 import { createStores } from "./db/repos.js";
-import {
-  dispatchDeploy,
-  readDeployStatus,
-  recoverWithRuntimeAdapter,
-  renderStatus,
-  runDryRun,
-  type StatusRepository,
-} from "./deploy/cli.js";
-import { configuredRuntimeObserverFor } from "./deploy/runtime-observer.js";
 import { createLogger } from "./logging.js";
 import { runMcpServer } from "./mcp/server.js";
 import { logFilePath, wakewireHome } from "./paths.js";
@@ -255,43 +248,46 @@ program
     console.log(changed ? "Desktop registration refreshed" : "Desktop registration is current");
   });
 
+interface T3AccessFlags {
+  registration?: string;
+  tokenFile?: string;
+  origin?: string;
+}
+const t3 = program.command("t3").description("Manage T3 Code access for the t3-thread sink");
+t3.command("login")
+  .description(
+    "Approve WakeWire in T3 Code (operate access, 30 days) and store the token privately",
+  )
+  .option("--registration <file>", "T3 registration (default: $WAKEWIRE_T3_REGISTRATION)")
+  .option("--token-file <file>", "Where to store the token (default: next to the registration)")
+  .option("--origin <url>", "T3 server origin (default: ~/.t3/userdata/server-runtime.json)")
+  .action(async (opts: T3AccessFlags) => {
+    await t3Login(opts);
+  });
+t3.command("status")
+  .description("Show when T3 access expires (never prints the token)")
+  .option("--registration <file>", "T3 registration (default: $WAKEWIRE_T3_REGISTRATION)")
+  .option("--token-file <file>", "Token file (default: next to the registration)")
+  .option("--origin <url>", "T3 server origin")
+  .action((opts: T3AccessFlags) => {
+    if (!t3Status(opts)) process.exitCode = 1;
+  });
+
+program
+  .command("selftest")
+  .description(
+    "Check T3, T3 access, the local listener and the public route; prints pass/fail with a reason",
+  )
+  .option("--json", "print the report as JSON")
+  .action(async (opts: { json?: boolean }) => {
+    if (!(await selftest(opts))) process.exitCode = 1;
+  });
+
 program
   .command("mcp")
   .description("Run the wakewire MCP server on stdio (used by the Codex plugin)")
   .action(async () => {
     await runMcpServer();
-  });
-
-program
-  .command("deploy")
-  .description("Read deployment status, run a synthetic dry run, or recover a verified fence")
-  .argument("[action]", "status, dry-run, or recover", "dry-run")
-  .option("--repository <id>", "fenced repository id")
-  .option("--intent <id>", "fenced intent id")
-  .option("--token <token>", "fenced lock token")
-  .action((action: string, options: { repository?: string; intent?: string; token?: string }) => {
-    const argv = [action];
-    if (options.repository) argv.push("--repository", options.repository);
-    if (options.intent) argv.push("--intent", options.intent);
-    if (options.token) argv.push("--token", options.token);
-    const db = action === "dry-run" ? null : openDatabase();
-    try {
-      const result = dispatchDeploy(argv, {
-        dryRun: () => runDryRun(),
-        recover: (evidence) => {
-          if (!db) throw new Error("recovery requires the local journal");
-          return recoverWithRuntimeAdapter(db, evidence, configuredRuntimeObserverFor);
-        },
-        status: () => (db ? readDeployStatus(db) : { repositories: [] }),
-      });
-      console.log(
-        action === "status"
-          ? renderStatus(result as { repositories: StatusRepository[] })
-          : JSON.stringify(result),
-      );
-    } finally {
-      db?.close();
-    }
   });
 
 program.parseAsync().catch((err) => {

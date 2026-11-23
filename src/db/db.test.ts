@@ -14,15 +14,7 @@ describe("migrations", () => {
       }>
     ).map((t) => t.name);
     expect(tables).toEqual(
-      expect.arrayContaining([
-        "routes",
-        "deliveries",
-        "sources",
-        "settings",
-        "schema_migrations",
-        "deploy_intents",
-        "deploy_fence",
-      ]),
+      expect.arrayContaining(["routes", "deliveries", "sources", "settings", "schema_migrations"]),
     );
   });
 });

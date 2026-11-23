@@ -15,6 +15,7 @@ const Repository = z.object({ full_name: RepositorySchema });
 const Pull = z.object({
   number: PositiveId,
   state: z.enum(["open", "closed"]),
+  mergeable: z.boolean().nullable().optional(),
   body: z.string().nullable(),
   labels: z.array(z.object({ name: z.string() })),
   head: z.object({ sha: Sha, ref: z.string().optional(), repo: Repository.nullable() }),
@@ -57,6 +58,7 @@ function pullIdentity(pr: z.infer<typeof Pull>) {
   return JSON.stringify([
     pr.number,
     pr.state,
+    pr.mergeable,
     pr.body,
     pr.head.sha,
     pr.head.ref,
@@ -220,8 +222,10 @@ export class GithubSnapshotClient {
     if (pullIdentity(current) !== pullIdentity(pr))
       throw new Error("GitHub PR changed during snapshot collection");
     return {
+      number,
       repository: this.repository,
       state: pr.state,
+      mergeable: pr.mergeable ?? null,
       headSha: sha,
       ...(pr.head.ref === undefined ? {} : { headBranch: pr.head.ref }),
       headRepository: pr.head.repo?.full_name ?? "",

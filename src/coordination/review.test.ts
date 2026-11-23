@@ -2,6 +2,15 @@ import { describe, expect, it } from "vitest";
 import { parseReview } from "./review.js";
 
 const valid = `<!-- agent-review:v1\nreviewer: hermes\ndecision: approve\nhead-sha: ${"a".repeat(40)}\n-->`;
+const legacy = `<!-- agent-review:v1
+reviewer: hermes
+pr: 89
+head: ${"a".repeat(40)}
+head-sha: ${"a".repeat(40)}
+decision: approve
+summary: Implementation approved.
+evidence: Full suite passed.
+-->`;
 describe("explicit review declarations", () => {
   it.each([
     "Summary: agent-review:v1 was used.",
@@ -30,5 +39,20 @@ describe("explicit review declarations", () => {
     expect(
       parseReview(`Uses agent-review:v1.\n${valid}\nagent-review:v1 is the protocol used above.`),
     ).toEqual({ kind: "review", reviewer: "hermes", decision: "approve", headSha: "a".repeat(40) });
+  });
+  it("accepts the complete legacy Hermes envelope", () => {
+    expect(parseReview(legacy)).toEqual({
+      kind: "review",
+      reviewer: "hermes",
+      decision: "approve",
+      headSha: "a".repeat(40),
+    });
+  });
+  it.each([
+    legacy.replace(`head: ${"a".repeat(40)}`, `head: ${"b".repeat(40)}`),
+    legacy.replace("evidence: Full suite passed.\n", ""),
+    legacy.replace("pr: 89", "pr: not-a-number"),
+  ])("rejects inconsistent or incomplete legacy envelopes", (body) => {
+    expect(parseReview(body)).toEqual({ kind: "invalid" });
   });
 });
